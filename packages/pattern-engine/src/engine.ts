@@ -17,6 +17,7 @@ import {
   type SegmentedEpisode,
 } from "./segmentation.js";
 import { clusterEpisodes, sequenceSimilarity, DEFAULT_SIMILARITY_THRESHOLD } from "./similarity.js";
+import { evaluateEligibility, type EligibilityVerdict } from "./eligibility.js";
 import {
   distinctDayCount,
   ELIGIBILITY,
@@ -102,6 +103,14 @@ export type EngineResult = {
   recommendations: Recommendation[];
   /** In-progress patterns (status "candidate") not yet surfaceable, with naming. */
   watching: WatchingPattern[];
+  /**
+   * Why each candidate did or did not clear the bars, keyed by `pattern_id`.
+   *
+   * Beside the candidates rather than on them: `PatternCandidate` is a wire
+   * contract whose sync projection rejects unknown fields, and a verdict is
+   * local diagnostic detail that has no business leaving the device.
+   */
+  verdicts: EligibilityVerdict[];
 };
 
 export function patternSignature(canonicalSequence: string[]): string {
@@ -127,6 +136,7 @@ export function runPatternEngine(
   );
 
   const candidates: PatternCandidate[] = [];
+  const verdicts: EligibilityVerdict[] = [];
   const recommendations: Recommendation[] = [];
   const watching: WatchingPattern[] = [];
 
@@ -185,25 +195,39 @@ export function runPatternEngine(
     const suppressed = options.suppressed_signatures?.includes(signature) ?? false;
     const dismissedRecently = options.recently_dismissed_signatures?.includes(signature) ?? false;
 
-    const eligible =
-      members.length >= eligibility.min_occurrences &&
-      days >= eligibility.min_distinct_days &&
-      cluster.similarity_mean >= eligibility.min_similarity_mean &&
-      scores.projected_minutes_saved_weekly >= eligibility.min_projected_minutes_weekly &&
-      scores.feasibility_score >= eligibility.min_feasibility &&
-      scores.risk_score <= eligibility.max_risk &&
-      !members.some((m) => m.excluded_from_learning) &&
-      !members.some((m) => m.sensitivity_max === "restricted") &&
-      !dismissedRecently &&
-      !suppressed;
+    const patternId = uuidv7({
+      timestampMs: Date.parse(firstSeen),
+      random: seeded(signature),
+    });
 
-    const surfaceable = eligible && scores.opportunity_score >= opportunityThreshold;
+    // ONE decision, reported and obeyed. The `&&` chain this replaced gave a
+    // boolean and no account of itself, which is how "438 episodes, 58
+    // candidates, ZERO eligible" could happen with nothing to point at. The
+    // verdict below is both the answer and the explanation, so a future
+    // diagnostic cannot describe a rule the engine is not applying.
+    const verdict = evaluateEligibility(
+      {
+        pattern_id: patternId,
+        occurrence_count: members.length,
+        distinct_day_count: days,
+        similarity_mean: cluster.similarity_mean,
+        projected_minutes_saved_weekly: scores.projected_minutes_saved_weekly,
+        feasibility_score: scores.feasibility_score,
+        risk_score: scores.risk_score,
+        opportunity_score: scores.opportunity_score,
+        excluded_from_learning: members.some((m) => m.excluded_from_learning),
+        has_restricted_sensitivity: members.some((m) => m.sensitivity_max === "restricted"),
+        dismissed_recently: dismissedRecently,
+        suppressed,
+      },
+      eligibility,
+      opportunityThreshold,
+    );
+    verdicts.push(verdict);
+    const surfaceable = verdict.surfaceable;
 
     const candidate: PatternCandidate = {
-      pattern_id: uuidv7({
-        timestampMs: Date.parse(firstSeen),
-        random: seeded(signature),
-      }),
+      pattern_id: patternId,
       owner_user_id: options.owner_user_id,
       first_seen_at: firstSeen,
       last_seen_at: lastSeen,
@@ -238,7 +262,7 @@ export function runPatternEngine(
     }
   }
 
-  return { episodes, candidates, recommendations, watching };
+  return { episodes, candidates, recommendations, watching, verdicts };
 }
 
 function toTemplateStep(event: PatternFeatureEvent): TemplateStepInput {

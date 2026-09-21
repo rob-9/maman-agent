@@ -1,6 +1,8 @@
 import {
   ELIGIBILITY,
+  evaluateEligibility,
   OPPORTUNITY_THRESHOLD,
+  type BarName,
   type EligibilityThresholds,
 } from "@maman/pattern-engine";
 import type { PatternCandidate } from "@maman/contracts";
@@ -62,35 +64,64 @@ export function patternGates(
 ): FormingProgress {
   const b = bars?.eligibility ?? ELIGIBILITY;
   const opportunityThreshold = bars?.opportunity_threshold ?? OPPORTUNITY_THRESHOLD;
+
+  // ONE source of truth for whether a bar is met. These gates used to re-derive
+  // every comparison (`c.occurrence_count >= b.min_occurrences`, …), which made
+  // this file a second implementation of the engine's eligibility chain — two
+  // copies of a rule that must agree, with nothing keeping them in step. The
+  // labels and wording below are this file's job; the VERDICT is not.
+  //
+  // The four flags are false by construction: a suppressed, dismissed, excluded
+  // or restricted pattern never reaches the Forming UI, so there is nothing for
+  // them to report here.
+  const verdict = evaluateEligibility(
+    {
+      pattern_id: c.pattern_id,
+      occurrence_count: c.occurrence_count,
+      distinct_day_count: c.distinct_day_count,
+      similarity_mean: c.similarity_mean,
+      projected_minutes_saved_weekly: c.projected_minutes_saved_weekly,
+      feasibility_score: c.feasibility_score,
+      risk_score: c.risk_score,
+      opportunity_score: c.opportunity_score,
+      excluded_from_learning: false,
+      has_restricted_sensitivity: false,
+      dismissed_recently: false,
+      suppressed: false,
+    },
+    b,
+    opportunityThreshold,
+  );
+  const met = (bar: BarName): boolean => verdict.bars.find((x) => x.bar === bar)?.passed ?? false;
   const gates: FormingGate[] = [
     {
       key: "repeats",
       label: "Seen enough times",
-      met: c.occurrence_count >= b.min_occurrences,
+      met: met("occurrences"),
       detail: `${c.occurrence_count} of ${b.min_occurrences} times`,
     },
     {
       key: "days",
       label: "On enough separate days",
-      met: c.distinct_day_count >= b.min_distinct_days,
+      met: met("distinct_days"),
       detail: `${c.distinct_day_count} of ${b.min_distinct_days} days`,
     },
     {
       key: "consistency",
       label: "Done the same way each time",
-      met: c.similarity_mean >= b.min_similarity_mean,
+      met: met("similarity"),
       detail: `${pct(c.similarity_mean)} alike (need ${pct(b.min_similarity_mean)})`,
     },
     {
       key: "time",
       label: "Worth enough time to automate",
-      met: c.projected_minutes_saved_weekly >= b.min_projected_minutes_weekly,
+      met: met("projected_minutes"),
       detail: `~${Math.round(c.projected_minutes_saved_weekly)} min/wk (need ${b.min_projected_minutes_weekly})`,
     },
     {
       key: "feasibility",
       label: "Safe steps a helper can do",
-      met: c.feasibility_score >= b.min_feasibility,
+      met: met("feasibility"),
       // SHOWS THE NUMBER, and says so when the answer is "none of them".
       //
       // This gate used to read "not yet", which is what every other unmet gate
@@ -109,7 +140,7 @@ export function patternGates(
     {
       key: "risk",
       label: "Low enough risk",
-      met: c.risk_score <= b.max_risk,
+      met: met("risk"),
       detail:
         c.risk_score <= b.max_risk
           ? `risk ${pct(c.risk_score)}`
@@ -118,7 +149,9 @@ export function patternGates(
     {
       key: "opportunity",
       label: "Clearly worth suggesting",
-      met: c.opportunity_score >= opportunityThreshold,
+      // Not an eligibility bar — opportunity ranks, it does not gate — so it is
+      // compared directly rather than looked up in `verdict.bars`.
+      met: verdict.opportunity_score >= verdict.opportunity_threshold,
       detail: `${pct(c.opportunity_score)} (need ${pct(opportunityThreshold)})`,
     },
   ];

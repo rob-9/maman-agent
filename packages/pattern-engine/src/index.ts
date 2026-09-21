@@ -67,3 +67,14 @@ export {
   type VerificationOutcome,
   type EpisodeTrace,
 } from "./replay.js";
+export {
+  evaluateEligibility,
+  summarizeEligibility,
+  UNTUNABLE_BARS,
+  type BarName,
+  type BarResult,
+  type BarTally,
+  type EligibilityInput,
+  type EligibilitySummary,
+  type EligibilityVerdict,
+} from "./eligibility.js";

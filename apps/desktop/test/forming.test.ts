@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ELIGIBILITY } from "@maman/pattern-engine";
+import {
+  ELIGIBILITY,
+  evaluateEligibility,
+  OPPORTUNITY_THRESHOLD,
+  type BarName,
+} from "@maman/pattern-engine";
 import type { PatternCandidate } from "@maman/contracts";
 import { patternGates } from "../src/lib/forming.js";
 
@@ -167,5 +172,102 @@ describe("the feasibility gate distinguishes 'never' from 'not yet'", () => {
     )!;
     expect(risky.met).toBe(false);
     expect(risky.detail).toMatch(/risk 95% \(limit \d+%\)/);
+  });
+});
+
+describe("forming gates agree with the engine's eligibility verdict", () => {
+  /**
+   * THE DRIFT GUARD.
+   *
+   * `patternGates` used to re-derive every comparison the engine makes, so this
+   * file and `runPatternEngine` were two implementations of one rule with
+   * nothing holding them together. They now share `evaluateEligibility`; this
+   * test fails if anyone reintroduces a local comparison.
+   */
+  const BAR_BY_GATE: Record<string, BarName> = {
+    repeats: "occurrences",
+    days: "distinct_days",
+    consistency: "similarity",
+    time: "projected_minutes",
+    feasibility: "feasibility",
+    risk: "risk",
+  };
+
+  const subject = (over: Partial<PatternCandidate>): PatternCandidate =>
+    ({
+      pattern_id: "00000000-0000-7000-8000-00000000c0de",
+      owner_user_id: "00000000-0000-7000-8000-00000000beef",
+      first_seen_at: "2026-09-01T09:00:00.000Z",
+      last_seen_at: "2026-09-03T09:00:00.000Z",
+      occurrence_count: 6,
+      distinct_day_count: 3,
+      median_duration_ms: 660_000,
+      p90_duration_ms: 780_000,
+      canonical_sequence: [],
+      episode_ids: [],
+      similarity_mean: 0.9,
+      repeatability_score: 0.9,
+      feasibility_score: 0.8,
+      risk_score: 0.3,
+      projected_minutes_saved_weekly: 70,
+      opportunity_score: 0.72,
+      status: "candidate",
+      ...over,
+    }) as PatternCandidate;
+
+  // EXACTLY ON EACH BOUNDARY, because that is the only place `>` and `>=`
+  // differ — and a gate rewritten as a local comparison is most likely to get
+  // the boundary wrong, not the direction. Without these rows this guard passes
+  // against a reintroduced `c.feasibility_score > b.min_feasibility`, which is
+  // how it was first written here.
+  const cases: Array<Partial<PatternCandidate>> = [
+    {},
+    { occurrence_count: 1 },
+    { distinct_day_count: 1 },
+    { similarity_mean: 0.2 },
+    { projected_minutes_saved_weekly: 2 },
+    { feasibility_score: 0 },
+    { risk_score: 0.95 },
+    { occurrence_count: 2, feasibility_score: 0.59, risk_score: 0.71 },
+    // on the bar, to the digit
+    { occurrence_count: ELIGIBILITY.min_occurrences },
+    { distinct_day_count: ELIGIBILITY.min_distinct_days },
+    { similarity_mean: ELIGIBILITY.min_similarity_mean },
+    { projected_minutes_saved_weekly: ELIGIBILITY.min_projected_minutes_weekly },
+    { feasibility_score: ELIGIBILITY.min_feasibility },
+    { risk_score: ELIGIBILITY.max_risk },
+    // one ulp under / over, so "met" must flip
+    { feasibility_score: ELIGIBILITY.min_feasibility - 0.0001 },
+    { risk_score: ELIGIBILITY.max_risk + 0.0001 },
+  ];
+
+  it.each(cases)("every shared gate matches the verdict for %j", (over) => {
+    const c = subject(over);
+    const progress = patternGates(c);
+    const verdict = evaluateEligibility(
+      {
+        pattern_id: c.pattern_id,
+        occurrence_count: c.occurrence_count,
+        distinct_day_count: c.distinct_day_count,
+        similarity_mean: c.similarity_mean,
+        projected_minutes_saved_weekly: c.projected_minutes_saved_weekly,
+        feasibility_score: c.feasibility_score,
+        risk_score: c.risk_score,
+        opportunity_score: c.opportunity_score,
+        excluded_from_learning: false,
+        has_restricted_sensitivity: false,
+        dismissed_recently: false,
+        suppressed: false,
+      },
+      ELIGIBILITY,
+      OPPORTUNITY_THRESHOLD,
+    );
+    for (const [gateKey, bar] of Object.entries(BAR_BY_GATE)) {
+      const gate = progress.gates.find((g) => g.key === gateKey);
+      expect(gate, `gate ${gateKey} missing`).toBeDefined();
+      expect(gate!.met, `gate ${gateKey} disagrees with bar ${bar}`).toBe(
+        verdict.bars.find((b) => b.bar === bar)!.passed,
+      );
+    }
   });
 });
