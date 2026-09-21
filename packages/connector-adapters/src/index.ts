@@ -20,3 +20,22 @@ export {
   ConnectorNotLinkedError,
   type RealRegistryConfig,
 } from "./registry.js";
+export {
+  parseAddress,
+  parseAddressList,
+  isSelf,
+  projectThread,
+  projectThreads,
+  type GmailHeader,
+  type GmailMessage,
+  type GmailThread,
+  type Participant,
+  type ProjectedThread,
+} from "./gmail-project.js";
+export {
+  syncGmailThreads,
+  type GmailSyncConfig,
+  type GmailSyncOptions,
+  type GmailSyncResult,
+} from "./gmail.js";
+export type { UserCredentialKey, UserCredentialProvider } from "./credentials.js";

@@ -396,15 +396,16 @@ Each of these is real, found in this codebase, and cost something.
 
 ### Progress
 
-| Item                               | State                                                                              |
-| ---------------------------------- | ---------------------------------------------------------------------------------- |
-| `obligation-engine` (L1 detection) | ✅ 24 tests, 3 drilled                                                             |
-| Two-level tenancy (migration 0008) | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd |
-| `withUser` transaction helper      | ✅ separate from `withTenant` by design                                            |
-| User-isolation integration tests   | ✅ 10 tests, two users in ONE org                                                  |
-| Gmail / CRM connectors             | ☐ next                                                                             |
-| Web UI — ranked obligations        | ☐                                                                                  |
-| Draft creation                     | ☐                                                                                  |
+| Item                                             | State                                                                              |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `obligation-engine` (L1 detection)               | ✅ 24 tests, 3 drilled                                                             |
+| Two-level tenancy (migration 0008)               | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd |
+| `withUser` transaction helper                    | ✅ separate from `withTenant` by design                                            |
+| User-isolation integration tests                 | ✅ 10 tests, two users in ONE org                                                  |
+| Gmail sync (metadata-only, per-user credentials) | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled   |
+| CRM connector                                    | ☐ next — find out which CRM first                                                  |
+| Web UI — ranked obligations                      | ☐                                                                                  |
+| Draft creation                                   | ☐                                                                                  |
 
 **Landed defect, worth keeping:** the first RLS policy spelled the guard as
 `current_setting('app.user_id', true)::uuid`. That returns NULL only while a
@@ -415,6 +416,30 @@ transaction-local set reverts to the EMPTY STRING, and `''::uuid` raises
 than a clean empty result. `NULLIF(..., '')` maps both cases to NULL. Caught by
 the test asserting the documented fail-closed behaviour, which is the entire
 reason that test exists.
+
+**Gmail, two design facts worth keeping:**
+
+- **The scope enforces the design.** The connector holds `gmail.metadata`,
+  which grants headers and NOT bodies, and every thread fetch asks for
+  `format=metadata` with an explicit `From`/`To`/`Subject` allowlist. So a
+  content-free `threads` table is not a convention anyone has to respect — it
+  is the only data we are permitted to read. Pinned by tests that assert on the
+  REQUESTS (every call is a GET; the allowlist is exactly those three headers),
+  because the privacy property lives in what is asked for, not in what comes
+  back. L2 drafting will need bodies for context, and that is a deliberate
+  scope escalation the user re-consents to — never requested early.
+- **Credentials are per-user, by type.** The existing `CredentialProvider` is
+  keyed `{organization_id, provider}` — correct for an org-installed Salesforce,
+  wrong for a mailbox. A new `UserCredentialProvider` keyed on `user_id` as well
+  makes it impossible to pass the org one and hand every rep the same inbox.
+  This is §5's two-level tenancy surfacing in the credential layer.
+
+Direction — whose turn it is — hinges on recognising the user's own address, so
+`isSelf` folds case, plus-addressing, and Gmail's dot-insensitivity (only on
+gmail.com/googlemail.com; folding dots on a corporate domain would merge two
+real mailboxes). The counterparty is taken across ALL messages, not the last
+one: on an outbound thread the last sender is the user and the other party only
+appears in `To`.
 
 **Phase 1 — foundations + first value (2–3 weeks).**
 Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.

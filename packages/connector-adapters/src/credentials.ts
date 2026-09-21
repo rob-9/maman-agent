@@ -24,6 +24,25 @@ export interface CredentialProvider {
 }
 
 /**
+ * Credentials that belong to ONE PERSON, not the organization.
+ *
+ * `CredentialProvider` above is keyed on org+provider, which is right for an
+ * org-installed connector like Salesforce: one linked instance, shared. A
+ * mailbox is not that. Gmail is authorized by each user for their own account,
+ * and reusing the org-keyed provider would hand every rep in the org the same
+ * inbox — the exact failure the per-user tables in migration 0008 exist to
+ * prevent. A distinct interface makes it impossible to pass the wrong one.
+ */
+export type UserCredentialKey = { organization_id: string; user_id: string; provider: string };
+
+export interface UserCredentialProvider {
+  /** Current credentials for this user's connection, or null when none is linked. */
+  load(input: UserCredentialKey): Promise<ProviderCredentials | null>;
+  /** Refresh + persist; throws PermanentAdapterError when refresh is impossible. */
+  refresh(input: UserCredentialKey): Promise<ProviderCredentials>;
+}
+
+/**
  * Single-write idempotency ledger. The demo/default is in-memory; the worker
  * injects a DB-backed store (unique run_steps.idempotency_key) so a worker
  * restart mid-write never double-applies.
