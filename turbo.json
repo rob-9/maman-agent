@@ -1,6 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "//": "Internal packages export TypeScript SOURCE directly (see CLAUDE.md), so a dependent's typecheck, lint and tests all read their dependencies' .ts files. With no `dependsOn`, turbo's default inputs are the package's own files only — a type change in packages/* could not invalidate a cached result in apps/*, and `pnpm -w typecheck` reported 24/24 while apps/api had a genuine cross-package type error. `^typecheck` puts the dependency's hash into the dependent's, which is what closes that.",
+  "//": "Internal packages export TypeScript SOURCE directly (see CLAUDE.md), so a dependent's typecheck, lint and tests all read their dependencies' .ts files. With no `dependsOn`, turbo's default inputs are the package's own files only — a type change in packages/* could not invalidate a cached result in apps/*, and `pnpm -w typecheck` reported 24/24 while apps/api had a genuine cross-package type error. `^typecheck` puts the dependency's hash into the dependent's, which is what closes that. GLOBALPASSTHROUGHENV: turbo 2 defaults envMode to STRICT, so a task sees only declared variables. Testcontainers (the db/api/worker integration suites) finds the Docker daemon through DOCKER_HOST; under Docker Desktop the socket sits at the default path and nothing is needed, which is why this gap stayed invisible — but on colima/podman/rancher that variable is the only way in, and stripped of it every integration suite fails with the opaque 'Could not find a working container runtime strategy'. passThrough rather than `globalEnv` because these describe the machine, not the build: they must not enter any task hash.",
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -35,5 +35,12 @@
     "test:coverage": {
       "outputs": ["coverage/**"]
     }
-  }
+  },
+  "globalPassThroughEnv": [
+    "DOCKER_HOST",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+    "DOCKER_CONFIG",
+    "TESTCONTAINERS_*"
+  ]
 }
