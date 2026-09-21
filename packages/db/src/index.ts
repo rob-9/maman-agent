@@ -1,6 +1,13 @@
 export * as schema from "./schema.js";
 export { createDbClient, type DbClient } from "./client.js";
-export { withTenant, MissingTenantContextError, type TenantContext } from "./tenant.js";
+export {
+  withTenant,
+  withUser,
+  MissingTenantContextError,
+  MissingUserContextError,
+  type TenantContext,
+  type UserContext,
+} from "./tenant.js";
 export {
   loadMigrations,
   migrateUp,

@@ -394,6 +394,28 @@ Each of these is real, found in this codebase, and cost something.
 
 ## 11. Phases
 
+### Progress
+
+| Item                               | State                                                                              |
+| ---------------------------------- | ---------------------------------------------------------------------------------- |
+| `obligation-engine` (L1 detection) | ✅ 24 tests, 3 drilled                                                             |
+| Two-level tenancy (migration 0008) | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd |
+| `withUser` transaction helper      | ✅ separate from `withTenant` by design                                            |
+| User-isolation integration tests   | ✅ 10 tests, two users in ONE org                                                  |
+| Gmail / CRM connectors             | ☐ next                                                                             |
+| Web UI — ranked obligations        | ☐                                                                                  |
+| Draft creation                     | ☐                                                                                  |
+
+**Landed defect, worth keeping:** the first RLS policy spelled the guard as
+`current_setting('app.user_id', true)::uuid`. That returns NULL only while a
+custom GUC has NEVER been set in the session; once any transaction has set it, a
+transaction-local set reverts to the EMPTY STRING, and `''::uuid` raises
+`invalid input syntax for type uuid`. So an org-scoped read of these tables
+**threw instead of returning nothing** — still safe, but an exception rather
+than a clean empty result. `NULLIF(..., '')` maps both cases to NULL. Caught by
+the test asserting the documented fail-closed behaviour, which is the entire
+reason that test exists.
+
 **Phase 1 — foundations + first value (2–3 weeks).**
 Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.
 `obligation-engine` (deterministic, unit-tested). Web UI: ranked obligations with
