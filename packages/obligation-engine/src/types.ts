@@ -61,8 +61,16 @@ export const contactSchema = z
     account_name: z.string().optional(),
     /** Open deal value in whole currency units, when the CRM has one. */
     open_deal_value: z.number().nonnegative().optional(),
-    /** False for a closed/won/lost relationship — no obligation is owed. */
-    has_open_deal: z.boolean(),
+    /**
+     * Whether a deal is open. TRI-STATE, and the third value matters.
+     *
+     * `true`/`false` come from a CRM. `null` means NO CRM HAS SAID — a contact
+     * synced from Gmail alone. Unknown is not closed: treating it as `false`
+     * suppresses every obligation for a user who has not connected a CRM yet,
+     * which is every user on day one. Unknown passes through and ranks below a
+     * known-open deal, so the CRM's answer promotes rather than unlocks.
+     */
+    has_open_deal: z.boolean().nullable(),
     /** Last meeting, from the calendar connector. */
     last_meeting_at: z.string().datetime().optional(),
   })
@@ -83,7 +91,7 @@ export const obligationReasonSchema = z
     threshold_days: z.number().int().positive(),
     last_direction: direction,
     message_count: z.number().int().positive(),
-    has_open_deal: z.boolean(),
+    has_open_deal: z.boolean().nullable(),
     open_deal_value: z.number().nonnegative().optional(),
   })
   .strict();

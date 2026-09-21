@@ -320,6 +320,9 @@ importers:
       '@maman/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@maman/obligation-engine':
+        specifier: workspace:*
+        version: link:../../packages/obligation-engine
       '@maman/policy-engine':
         specifier: workspace:*
         version: link:../../packages/policy-engine

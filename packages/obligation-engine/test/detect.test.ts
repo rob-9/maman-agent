@@ -124,6 +124,52 @@ describe("detectObligations", () => {
     ).toBe(kind);
   });
 
+  it("lets an UNKNOWN deal state through — no CRM is not the same as closed", () => {
+    // Day one, Gmail only, no CRM connected. Treating unknown as closed would
+    // show this user nothing at all and teach them the product is empty.
+    const [o] = detect([thread({ last_message_at: ago(9) })], [contact({ has_open_deal: null })]);
+    expect(o).toBeDefined();
+    expect(o!.reason.has_open_deal).toBeNull();
+  });
+
+  it("ranks a known-open deal above an unknown one at equal lateness", () => {
+    // The CRM's confirmation PROMOTES; it does not unlock.
+    const results = detect(
+      [
+        thread({ thread_id: "unknown", contact_id: "u", last_message_at: ago(9) }),
+        thread({ thread_id: "known", contact_id: "k", last_message_at: ago(9) }),
+      ],
+      [contact({ contact_id: "u", has_open_deal: null }), contact({ contact_id: "k" })],
+    );
+    expect(results.map((o) => o.thread_id)).toEqual(["known", "unknown"]);
+  });
+
+  it("an unknown deal never crosses a kind boundary", () => {
+    // The penalty must reorder WITHIN a band only. An unknown-deal reply the
+    // user owes still outranks a known-open thread they are merely waiting on.
+    const results = detect(
+      [
+        thread({
+          thread_id: "owed",
+          contact_id: "u",
+          last_direction: "inbound",
+          last_message_at: ago(3),
+        }),
+        thread({
+          thread_id: "waiting",
+          contact_id: "k",
+          last_direction: "outbound",
+          last_message_at: ago(30),
+        }),
+      ],
+      [
+        contact({ contact_id: "u", has_open_deal: null }),
+        contact({ contact_id: "k", open_deal_value: 10_000_000 }),
+      ],
+    );
+    expect(results.map((o) => o.thread_id)).toEqual(["owed", "waiting"]);
+  });
+
   it("ignores a closed relationship entirely", () => {
     // A list containing won and lost deals is the fastest way to teach someone
     // it is not worth reading.

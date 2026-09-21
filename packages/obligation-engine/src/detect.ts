@@ -57,8 +57,13 @@ export function rankObligation(
   thresholdDays: number,
   openDealValue: number | undefined,
   config: DetectionConfig,
+  hasOpenDeal: boolean | null = true,
 ): number {
   const kindWeight = kind === "awaiting_you" ? 100 : kind === "unsent_followup" ? 60 : 30;
+  // An UNKNOWN deal state ranks below a known-open one at equal lateness — the
+  // CRM's confirmation promotes. Smaller than the kind gap on purpose, so it
+  // can reorder within a band and never across one.
+  const unknownPenalty = hasOpenDeal === null ? 5 : 0;
 
   const overdue = Math.max(0, daysElapsed - thresholdDays);
   // Saturating: 0 at the threshold, approaching 1, ~0.5 at one threshold past.
@@ -68,7 +73,7 @@ export function rankObligation(
   const value = openDealValue ?? 0;
   const valueTerm = value / (value + config.value_normalizer);
 
-  return round4(kindWeight + 20 * overdueTerm + 10 * valueTerm);
+  return round4(kindWeight + 20 * overdueTerm + 10 * valueTerm - unknownPenalty);
 }
 
 function round4(n: number): number {
@@ -90,10 +95,12 @@ function kindFor(
   kind: ObligationKind;
   days: number;
 } | null {
-  // A closed relationship owes nothing. Checked first: without it the list
-  // fills with won and lost deals, which is the fastest way to teach someone
-  // that the list is not worth reading.
-  if (!contact.has_open_deal) return null;
+  // A KNOWN-closed relationship owes nothing. Checked first: without it the
+  // list fills with won and lost deals, which is the fastest way to teach
+  // someone that the list is not worth reading. `null` — no CRM has said — is
+  // not closed, and must pass: a user with only Gmail connected would otherwise
+  // see nothing at all.
+  if (contact.has_open_deal === false) return null;
 
   const days = daysBetween(thread.last_message_at, now);
 
@@ -159,6 +166,7 @@ export function detectObligations(input: DetectInput): Obligation[] {
         thresholdDays,
         contact.open_deal_value,
         config,
+        contact.has_open_deal,
       ),
       reason: {
         kind: matched.kind,

@@ -379,3 +379,71 @@ export const audit_chain_heads = pgTable("audit_chain_heads", {
   latest_event_hash: text("latest_event_hash"),
   updated_at: utc("updated_at").notNull().defaultNow(),
 });
+
+// ---------- per-user workspace (0008, 0009) ----------
+// Two-level tenancy: every row carries owner_user_id and the RLS policy
+// requires BOTH ids. Read and write through `withUser`, never `withTenant`.
+
+export const user_connections = pgTable("user_connections", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  provider: text("provider").notNull(),
+  external_account_label: text("external_account_label").notNull(),
+  encrypted_credentials: bytea("encrypted_credentials").notNull(),
+  scopes: text("scopes").array().notNull(),
+  status: text("status", { enum: ["active", "expired", "revoked", "error"] }).notNull(),
+  last_synced_at: utc("last_synced_at"),
+  last_error: text("last_error"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+export const contacts = pgTable("contacts", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  connection_id: uuid("connection_id").notNull(),
+  external_id: text("external_id").notNull(),
+  display_name: text("display_name").notNull(),
+  account_name: text("account_name"),
+  // Nullable since 0009: NULL is "no CRM has said", distinct from false.
+  has_open_deal: boolean("has_open_deal"),
+  open_deal_value: numeric("open_deal_value", { precision: 14, scale: 2 }),
+  last_meeting_at: utc("last_meeting_at"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+export const threads = pgTable("threads", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  connection_id: uuid("connection_id").notNull(),
+  contact_id: uuid("contact_id").notNull(),
+  external_id: text("external_id").notNull(),
+  subject: text("subject").notNull(),
+  last_message_at: utc("last_message_at").notNull(),
+  last_direction: text("last_direction", { enum: ["inbound", "outbound"] }).notNull(),
+  message_count: integer("message_count").notNull(),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+export const obligations = pgTable("obligations", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  thread_id: uuid("thread_id").notNull(),
+  contact_id: uuid("contact_id").notNull(),
+  kind: text("kind", { enum: ["awaiting_you", "awaiting_them", "unsent_followup"] }).notNull(),
+  rank: numeric("rank", { precision: 10, scale: 4 }).notNull(),
+  reason: jsonb("reason").notNull(),
+  outcome: text("outcome", {
+    enum: ["pending", "drafted", "snoozed", "dismissed", "resolved"],
+  }).notNull(),
+  snoozed_until: utc("snoozed_until"),
+  detected_at: utc("detected_at").notNull().defaultNow(),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});

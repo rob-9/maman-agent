@@ -21,3 +21,4 @@ export {
   type EnvelopeCiphertext,
   type ConnectionHealth,
 } from "./vault.js";
+export { packEnvelope, unpackEnvelope, type EnvelopeAad } from "./vault.js";

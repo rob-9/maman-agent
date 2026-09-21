@@ -9,6 +9,54 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
  * server-side vault can open them.
  */
 
+/**
+ * What a ciphertext is BOUND to. Decryption fails if any part differs.
+ *
+ * `user_id` is optional for compatibility with org-installed connectors, and
+ * REQUIRED in spirit for anything per-user: without it, an encrypted Gmail
+ * token could be copied from one rep's row to another's in the same org and
+ * would still decrypt. The AAD is the only thing that makes "this secret
+ * belongs to this person" a cryptographic fact rather than a column value.
+ */
+export type EnvelopeAad = { organization_id: string; user_id?: string; provider: string };
+
+function aadFor(parts: EnvelopeAad, keyVersion: number): Buffer {
+  // The user segment is positional, so an org-bound and a user-bound AAD can
+  // never collide — `org:provider:v` and `org:user:provider:v` differ in shape.
+  const segments = [parts.organization_id];
+  if (parts.user_id !== undefined) segments.push(`u=${parts.user_id}`);
+  segments.push(parts.provider, String(keyVersion));
+  return Buffer.from(segments.join(":"));
+}
+
+/**
+ * One-column storage form. `user_connections.encrypted_credentials` is a
+ * single bytea, unlike `connector_accounts` which spreads the envelope over
+ * three columns. Both directions are exact inverses; a byte of drift fails
+ * decryption loudly rather than yielding a wrong token silently.
+ */
+export function packEnvelope(env: EnvelopeCiphertext): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      c: env.ciphertext.toString("base64"),
+      k: env.encrypted_data_key.toString("base64"),
+      v: env.key_version,
+    }),
+  );
+}
+
+export function unpackEnvelope(packed: Uint8Array): EnvelopeCiphertext {
+  const o = JSON.parse(Buffer.from(packed).toString()) as { c: string; k: string; v: number };
+  if (typeof o.c !== "string" || typeof o.k !== "string" || typeof o.v !== "number") {
+    throw new Error("malformed packed envelope");
+  }
+  return {
+    ciphertext: Buffer.from(o.c, "base64"),
+    encrypted_data_key: Buffer.from(o.k, "base64"),
+    key_version: o.v,
+  };
+}
+
 export type EnvelopeCiphertext = {
   ciphertext: Buffer; // nonce || aes-256-gcm ciphertext of the payload
   encrypted_data_key: Buffer; // nonce || wrap of the data key
@@ -36,11 +84,11 @@ function open(key: Buffer, sealed: Buffer, aad: Buffer): Buffer {
 export function envelopeEncrypt(
   payload: Record<string, unknown>,
   masterKey: Buffer,
-  aadParts: { organization_id: string; provider: string },
+  aadParts: EnvelopeAad,
   keyVersion = 1,
 ): EnvelopeCiphertext {
   if (masterKey.length !== 32) throw new Error("master key must be 32 bytes");
-  const aad = Buffer.from(`${aadParts.organization_id}:${aadParts.provider}:${keyVersion}`);
+  const aad = aadFor(aadParts, keyVersion);
   const dataKey = randomBytes(32);
   const ciphertext = seal(dataKey, Buffer.from(JSON.stringify(payload)), aad);
   const encryptedDataKey = seal(masterKey, dataKey, aad);
@@ -50,11 +98,9 @@ export function envelopeEncrypt(
 export function envelopeDecrypt(
   envelope: EnvelopeCiphertext,
   masterKey: Buffer,
-  aadParts: { organization_id: string; provider: string },
+  aadParts: EnvelopeAad,
 ): Record<string, unknown> {
-  const aad = Buffer.from(
-    `${aadParts.organization_id}:${aadParts.provider}:${envelope.key_version}`,
-  );
+  const aad = aadFor(aadParts, envelope.key_version);
   const dataKey = open(masterKey, envelope.encrypted_data_key, aad);
   const plaintext = open(dataKey, envelope.ciphertext, aad);
   return JSON.parse(plaintext.toString()) as Record<string, unknown>;

@@ -25,3 +25,18 @@ export {
 } from "./audit.js";
 export * from "./repositories.js";
 export * from "./factories.js";
+export {
+  upsertSyncedThreads,
+  loadDetectionInputs,
+  replacePendingObligations,
+  listPendingObligations,
+  type SyncedThread,
+  type UpsertResult,
+  type DetectionInputs,
+  type DetectedObligation,
+  type PendingObligationRow,
+  getUserConnection,
+  updateUserConnectionCredentials,
+  markUserConnectionSync,
+  type UserConnectionRow,
+} from "./workspace.js";

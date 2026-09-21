@@ -396,16 +396,18 @@ Each of these is real, found in this codebase, and cost something.
 
 ### Progress
 
-| Item                                             | State                                                                              |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `obligation-engine` (L1 detection)               | ✅ 24 tests, 3 drilled                                                             |
-| Two-level tenancy (migration 0008)               | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd |
-| `withUser` transaction helper                    | ✅ separate from `withTenant` by design                                            |
-| User-isolation integration tests                 | ✅ 10 tests, two users in ONE org                                                  |
-| Gmail sync (metadata-only, per-user credentials) | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled   |
-| CRM connector                                    | ☐ next — find out which CRM first                                                  |
-| Web UI — ranked obligations                      | ☐                                                                                  |
-| Draft creation                                   | ☐                                                                                  |
+| Item                                                            | State                                                                                    |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                   |
+| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd       |
+| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                  |
+| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                        |
+| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled         |
+| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills |
+| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end         |
+| CRM connector                                                   | ☐ next — find out which CRM first                                                        |
+| Web UI — ranked obligations                                     | ☐                                                                                        |
+| Draft creation                                                  | ☐                                                                                        |
 
 **Landed defect, worth keeping:** the first RLS policy spelled the guard as
 `current_setting('app.user_id', true)::uuid`. That returns NULL only while a
@@ -440,6 +442,32 @@ gmail.com/googlemail.com; folding dots on a corporate domain would merge two
 real mailboxes). The counterparty is taken across ALL messages, not the last
 one: on an outbound thread the last sender is the user and the other party only
 appears in `To`.
+
+**The slice, and three things wiring it surfaced** (each a §10-class lesson —
+a part is not done until it runs in a real path):
+
+- **Deal state is tri-state.** Migration 0008 said `has_open_deal NOT NULL
+DEFAULT false`; the detector suppresses closed relationships; so a Gmail-only
+  user — every user on day one — saw nothing. 0009 makes it nullable, NULL =
+  "no CRM has said". Unknown passes and ranks 5 below known-open at equal
+  lateness: within a kind band, never across one. The CRM's answer promotes, it
+  does not unlock.
+- **Envelope encryption was org-bound.** `envelopeEncrypt`'s AAD was
+  `org:provider`, so a rep's encrypted Gmail token copied into a colleague's row
+  in the same org would still decrypt. `EnvelopeAad` gains a positional
+  `user_id` segment; org-bound and user-bound can never collide; org-installed
+  connectors are unchanged. The slice test copies Alice's ciphertext into Bob's
+  row and asserts: refused, zero Gmail calls, failure recorded on HIS row.
+- **Reads had no ORDER BY.** Two reads of one workspace could disagree.
+  Ordered now.
+
+A sync failure is written to the connection row (`last_error`, status) rather
+than swallowed — a list that quietly stops updating reads as "it stopped
+working". And a sweep rewrites only PENDING obligations, so a snoozed or
+dismissed thread is never re-surfaced: a reminder, not a nag.
+
+Gate at this point: lint 24/24 · typecheck 24/24 · unit 22/22 tasks ·
+integration **103** (db 63, worker 12, api 28) · build 5/5.
 
 **Phase 1 — foundations + first value (2–3 weeks).**
 Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.
