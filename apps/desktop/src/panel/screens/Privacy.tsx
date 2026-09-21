@@ -4,6 +4,13 @@ import { invokeCommand, isTauri } from "../../lib/bridge.js";
 import { deleteAllEvents, deleteAppHistory, fetchTimeline } from "../../lib/events.js";
 import { browserActuationOrigins } from "../../lib/browserRun.js";
 import { Button, Card, Muted, SectionTitle, StatusPill, Toggle } from "../ui.js";
+import {
+  pressEvidence,
+  profileObservations,
+  type ObservationProfile,
+  type PressEvidence,
+} from "@maman/pattern-engine";
+import type { PatternFeatureEvent } from "@maman/contracts";
 
 type ObservationStats = {
   week_start: string;
@@ -21,6 +28,8 @@ export function Privacy() {
   const [newOrigin, setNewOrigin] = useState("");
   const [originError, setOriginError] = useState<string | null>(null);
   const [stats, setStats] = useState<ObservationStats | null>(null);
+  const [profile, setProfile] = useState<ObservationProfile | null>(null);
+  const [press, setPress] = useState<PressEvidence | null>(null);
   const [hardDenied, setHardDenied] = useState<string[]>([]);
   const [syncPreview, setSyncPreview] = useState<unknown[] | null>(null);
   const [observedApps, setObservedApps] = useState<string[]>([]);
@@ -30,6 +39,17 @@ export function Privacy() {
     if (isTauri()) {
       void invokeCommand<ObservationStats>("observation_stats")
         .then(setStats)
+        .catch(() => {});
+      // The SAME projection the pattern engine consumes, profiled rather than
+      // detected on. Diagnosing the pipeline from its input is the only way to
+      // explain an empty candidate list — with no candidates there are no
+      // verdicts, so the eligibility report has nothing to say.
+      void invokeCommand<PatternFeatureEvent[]>("events_pattern_features", { limit: 50_000 })
+        .then((features) => {
+          const p = profileObservations(features);
+          setProfile(p);
+          setPress(pressEvidence(p));
+        })
         .catch(() => {});
       void invokeCommand<string[]>("hard_denied_list")
         .then(setHardDenied)
@@ -366,6 +386,77 @@ export function Privacy() {
           </div>
         ) : (
           <Muted>Live counters are available in the desktop app.</Muted>
+        )}
+      </Card>
+
+      <Card>
+        <SectionTitle>What the observer is seeing</SectionTitle>
+        <Muted>
+          Counts only — never a label, a value or a site. This is the same redacted projection the
+          pattern engine reads, so it explains why suggestions have or have not appeared.
+        </Muted>
+        {profile && press ? (
+          <div className="mt-2 space-y-3 text-xs">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 tabular-nums">
+              <span className="text-muted">Events profiled</span>
+              <span className="text-right text-ink">{profile.events}</span>
+              <span className="text-muted">Given a domain meaning</span>
+              <span className="text-right text-ink">
+                {profile.classified} of {profile.events}
+              </span>
+              <span className="text-muted">Joined to a replayable trace</span>
+              <span className="text-right text-ink">
+                {profile.traced} of {profile.events}
+              </span>
+              <span className="text-muted">Carried no control role</span>
+              <span className="text-right text-ink">{profile.roleless}</span>
+            </div>
+
+            <div>
+              <div className="text-muted">Kinds of moment recorded</div>
+              <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 tabular-nums">
+                {Object.entries(profile.by_event_type)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([type, n]) => (
+                    <div key={type} className="contents">
+                      <span className="text-muted">{type}</span>
+                      <span className="text-right text-ink">{n}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            {profile.roles.length > 0 && (
+              <div>
+                <div className="text-muted">Controls involved</div>
+                <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 tabular-nums">
+                  {profile.roles.slice(0, 10).map((r) => (
+                    <div key={r.role} className="contents">
+                      <span className="text-muted">{r.role}</span>
+                      <span className="text-right text-ink">{r.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Whether a recorded routine can contain the step that SUBMITS it.
+                Without a press, a helper built from it fills the fields and
+                never saves — so this is stated plainly rather than inferred
+                from the role list above. */}
+            <div className="border-t border-line pt-2">
+              <span className="text-muted">Button presses captured: </span>
+              <span className="text-ink">
+                {press.verdict === "observed"
+                  ? `yes — ${press.events} on buttons or links, ${press.focused} usable as a press`
+                  : press.verdict === "none"
+                    ? "no — controls were recorded, but never a button or link"
+                    : "unknown — nothing recorded a control role, so this cannot be answered yet"}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <Muted>Available in the desktop app once observation has recorded something.</Muted>
         )}
       </Card>
 

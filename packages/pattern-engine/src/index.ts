@@ -78,3 +78,10 @@ export {
   type EligibilitySummary,
   type EligibilityVerdict,
 } from "./eligibility.js";
+export {
+  profileObservations,
+  pressEvidence,
+  type ObservationProfile,
+  type PressEvidence,
+  type RoleTally,
+} from "./observation-profile.js";
