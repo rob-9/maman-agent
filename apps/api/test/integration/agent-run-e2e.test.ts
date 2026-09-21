@@ -8,7 +8,12 @@ import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import { createDbClient, loadMigrations, migrateUp, withTenant, type DbClient } from "@maman/db";
 import { uuidv7, type AgentSpec } from "@maman/contracts";
-import { compileAgentSpec, DemoSalesforceWorld, demoAdapterRegistry } from "@maman/agent-runtime";
+import {
+  compileAgentSpec,
+  DEMO_ACCOUNT_LIST,
+  DemoSalesforceWorld,
+  demoAdapterRegistry,
+} from "@maman/agent-runtime";
 import { createActivities } from "@maman/worker";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import type { ServerEnv } from "@maman/config";
@@ -181,7 +186,11 @@ describe("agent-lifecycle round-trip over Temporal, approved from a device token
         method: "POST",
         url: `/v1/agents/${agentId}/runs`,
         headers: asDevice(deviceToken),
-        payload: { mode: "supervised", trigger_idempotency_key: "e2e-idem-1" },
+        payload: {
+          mode: "supervised",
+          trigger_idempotency_key: "e2e-idem-1",
+          agent_inputs: { account_csv: DEMO_ACCOUNT_LIST },
+        },
       });
       expect(run.statusCode).toBe(200);
       const runId = run.json().run_id as string;
@@ -191,7 +200,11 @@ describe("agent-lifecycle round-trip over Temporal, approved from a device token
         method: "POST",
         url: `/v1/agents/${agentId}/runs`,
         headers: asDevice(deviceToken),
-        payload: { mode: "supervised", trigger_idempotency_key: "e2e-idem-1" },
+        payload: {
+          mode: "supervised",
+          trigger_idempotency_key: "e2e-idem-1",
+          agent_inputs: { account_csv: DEMO_ACCOUNT_LIST },
+        },
       });
       expect(dup.json().run_id).toBe(runId);
       expect(dup.json().duplicate).toBe(true);
@@ -305,7 +318,11 @@ describe("agent-lifecycle round-trip over Temporal, approved from a device token
         method: "POST",
         url: `/v1/agents/${agentId}/runs`,
         headers: asUser(),
-        payload: { mode: "shadow", trigger_idempotency_key: "e2e-shadow-1" },
+        payload: {
+          mode: "shadow",
+          trigger_idempotency_key: "e2e-shadow-1",
+          agent_inputs: { account_csv: DEMO_ACCOUNT_LIST },
+        },
       });
       const runId = run.json().run_id as string;
       // Shadow has no approval gate — it runs straight to completion.
@@ -318,5 +335,57 @@ describe("agent-lifecycle round-trip over Temporal, approved from a device token
     });
 
     expect(shadowWorld.applied.size).toBe(0);
+  });
+
+  /**
+   * REGRESSION: the route used to hardcode `agent_inputs: {}`.
+   *
+   * The reconciliation recipe declares `account_csv` required, and
+   * `agentRunWorkflow` refuses before step one — so every such run persisted a
+   * run row, started a workflow, and answered 200 for something already lost.
+   * The caller was told the run had begun and learned otherwise, if at all,
+   * from a terminal status minutes later.
+   *
+   * The refusal belongs at the boundary: no run row, no workflow, and a reply
+   * that names what is missing.
+   */
+  it("refuses a run whose required inputs are absent, before any run or workflow exists", async () => {
+    const spec = await compileSpec();
+    const create = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: asUser(),
+      payload: { spec },
+    });
+    expect(create.statusCode).toBe(200);
+    const agentId = create.json().agent_id as string;
+
+    const before = await withTenant(
+      client.sql,
+      { organizationId: orgId },
+      (tx) => tx`select count(*)::int as n from agent_runs where agent_id = ${agentId}`,
+    );
+
+    const run = await app.inject({
+      method: "POST",
+      url: `/v1/agents/${agentId}/runs`,
+      headers: asUser(),
+      payload: { mode: "supervised", trigger_idempotency_key: "e2e-missing-inputs" },
+    });
+
+    expect(run.statusCode).toBe(400);
+    // Names the LABEL so the caller can act; never echoes a supplied value.
+    expect(run.json().missing_inputs).toEqual([
+      expect.objectContaining({ key: "account_csv", source: "user", reason: "not_supplied" }),
+    ]);
+    expect(run.json().detail).toMatch(/Account list/i);
+
+    // The decisive assertion: nothing was persisted and nothing was started.
+    const after = await withTenant(
+      client.sql,
+      { organizationId: orgId },
+      (tx) => tx`select count(*)::int as n from agent_runs where agent_id = ${agentId}`,
+    );
+    expect(after[0]!.n).toBe(before[0]!.n);
   });
 });

@@ -17,6 +17,7 @@ import {
   agentBudgetsSchema,
   agentSpecSchema,
   deviceRegisterRequestSchema,
+  jsonValueSchema,
   patternCandidateSchema,
   principalSchema,
   syncBatchRequestSchema,
@@ -24,7 +25,7 @@ import {
   uuidv7,
   type Principal,
 } from "@maman/contracts";
-import { compileAgentSpec } from "@maman/agent-runtime";
+import { compileAgentSpec, describeMissingInputs, validateAgentInputs } from "@maman/agent-runtime";
 import { createModelProvider } from "@maman/model-provider";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import type { ServerEnv } from "@maman/config";
@@ -419,6 +420,18 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       .object({
         mode: z.enum(["shadow", "supervised", "active"]),
         trigger_idempotency_key: z.string().min(1),
+        /**
+         * Values for the spec's declared inputs.
+         *
+         * This route used to hardcode `{}`, which meant the durable path could
+         * not run ANY agent declaring a required input: `agentRunWorkflow`
+         * refuses before step one (`validateAgentInputs`), so the call
+         * persisted a run row, started a workflow, and returned 200 for
+         * something that was already doomed. The reconciliation recipe
+         * declares `account_csv` required, so that was every reconciliation
+         * agent, in production.
+         */
+        agent_inputs: z.record(z.string(), jsonValueSchema).default({}),
       })
       .safeParse(req.body);
     if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
@@ -429,6 +442,29 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       // Missing or cross-tenant — 404, never 403 (no existence leak).
       return reply.status(404).send({ status: 404, title: "Not Found" });
     }
+    // A run that cannot satisfy its own spec is refused HERE, before a run row
+    // exists and before the workflow starts. The workflow keeps its own
+    // identical gate as defence in depth, but reaching it means persisting a
+    // run that is already lost and answering the caller 200 — so the boundary
+    // is the honest place to say no. The message names the missing LABELS,
+    // never a supplied value, because this reply is logged.
+    const readiness = validateAgentInputs(agent.spec, body.data.agent_inputs);
+    if (!readiness.ready) {
+      return reply.status(400).send({
+        type: "about:blank",
+        title: "Bad Request",
+        status: 400,
+        detail: describeMissingInputs(readiness.missing),
+        missing_inputs: readiness.missing.map((m) => ({
+          key: m.key,
+          label: m.label,
+          source: m.source,
+          reason: m.reason,
+        })),
+        request_id: req.id,
+      });
+    }
+
     const runId = uuidv7();
     const workflowId = `run-${runId}`;
     const created = await createRun(deps.sql, ctx, {
@@ -454,7 +490,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       owner_user_id: agent.owner_user_id,
       mode: body.data.mode,
       trigger: { type: "manual" as const, idempotency_key: body.data.trigger_idempotency_key },
-      agent_inputs: {},
+      agent_inputs: body.data.agent_inputs,
       policy_version_id: agent.policy_version_id,
       requested_at: new Date().toISOString(),
     };

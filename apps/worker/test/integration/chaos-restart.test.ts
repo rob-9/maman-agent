@@ -3,7 +3,12 @@ import { TestWorkflowEnvironment } from "@temporalio/testing";
 import { Worker } from "@temporalio/worker";
 import { createRequire } from "node:module";
 import { uuidv7, type AgentRunInput, type AgentSpec } from "@maman/contracts";
-import { compileAgentSpec, DemoSalesforceWorld, demoAdapterRegistry } from "@maman/agent-runtime";
+import {
+  compileAgentSpec,
+  DEMO_ACCOUNT_LIST,
+  DemoSalesforceWorld,
+  demoAdapterRegistry,
+} from "@maman/agent-runtime";
 import {
   agentRunWorkflow,
   approveStepSignal,
@@ -93,7 +98,11 @@ function runInput(spec: AgentSpec): AgentRunInput {
     owner_user_id: userId,
     mode: "supervised",
     trigger: { type: "manual", idempotency_key: uuidv7() },
-    agent_inputs: {},
+    // The reconciliation recipe declares `account_csv` REQUIRED, and
+    // `validateAgentInputs` refuses before step one. Bind the bundled sample
+    // explicitly — the same sentinel the desktop passes — so the run says
+    // which data it describes instead of a fixture arriving unannounced.
+    agent_inputs: { account_csv: DEMO_ACCOUNT_LIST },
     policy_version_id: uuidv7(),
     requested_at: "2026-07-20T18:00:00.000Z",
   };

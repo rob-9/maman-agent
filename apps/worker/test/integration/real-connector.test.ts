@@ -5,7 +5,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDbClient, loadMigrations, migrateUp, withTenant, type DbClient } from "@maman/db";
 import { uuidv7, type AgentRunInput, type AgentSpec } from "@maman/contracts";
-import { compileAgentSpec, demoAdapterRegistry, DemoSalesforceWorld } from "@maman/agent-runtime";
+import {
+  compileAgentSpec,
+  DEMO_ACCOUNT_LIST,
+  demoAdapterRegistry,
+  DemoSalesforceWorld,
+} from "@maman/agent-runtime";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { envelopeEncrypt } from "@maman/connector-auth";
 import {
@@ -118,7 +123,11 @@ function runInput(spec: AgentSpec): AgentRunInput {
     owner_user_id: userId,
     mode: "supervised",
     trigger: { type: "manual", idempotency_key: uuidv7() },
-    agent_inputs: {},
+    // The reconciliation recipe declares `account_csv` REQUIRED, and
+    // `validateAgentInputs` refuses before step one. Bind the bundled sample
+    // explicitly — the same sentinel the desktop passes — so the run says
+    // which data it describes instead of a fixture arriving unannounced.
+    agent_inputs: { account_csv: DEMO_ACCOUNT_LIST },
     policy_version_id: uuidv7(),
     requested_at: "2026-07-17T18:00:00.000Z",
   };
