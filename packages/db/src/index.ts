@@ -39,4 +39,9 @@ export {
   updateUserConnectionCredentials,
   markUserConnectionSync,
   type UserConnectionRow,
+  createUserConnection,
+  listUserConnections,
+  setObligationOutcome,
+  type UserConnectionView,
+  type ObligationOutcome,
 } from "./workspace.js";

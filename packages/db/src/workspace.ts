@@ -355,3 +355,124 @@ export async function markUserConnectionSync(
       .where(eq(schema.user_connections.id, connectionId));
   });
 }
+
+/** Creates a connection row. Credentials arrive already envelope-encrypted and packed. */
+export async function createUserConnection(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    provider: string;
+    external_account_label: string;
+    encrypted_credentials: Uint8Array;
+    scopes: string[];
+  },
+): Promise<{ id: string }> {
+  return withUser(sql, ctx, async (tx) => {
+    const id = uuidv7();
+    // One connection per (user, provider, label). Reconnecting replaces the
+    // credentials rather than stacking a second row the sync would ignore.
+    await db(tx)
+      .insert(schema.user_connections)
+      .values({
+        id,
+        organization_id: ctx.organizationId,
+        owner_user_id: ctx.userId,
+        provider: input.provider,
+        external_account_label: input.external_account_label,
+        encrypted_credentials: input.encrypted_credentials,
+        scopes: input.scopes,
+        status: "active",
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.user_connections.organization_id,
+          schema.user_connections.owner_user_id,
+          schema.user_connections.provider,
+          schema.user_connections.external_account_label,
+        ],
+        set: {
+          encrypted_credentials: input.encrypted_credentials,
+          scopes: input.scopes,
+          status: "active",
+          last_error: null,
+          updated_at: rawSql`now()`,
+        },
+      });
+    const [row] = await db(tx)
+      .select({ id: schema.user_connections.id })
+      .from(schema.user_connections)
+      .where(
+        and(
+          eq(schema.user_connections.provider, input.provider),
+          eq(schema.user_connections.external_account_label, input.external_account_label),
+        ),
+      )
+      .limit(1);
+    return { id: row!.id };
+  });
+}
+
+export type UserConnectionView = {
+  id: string;
+  provider: string;
+  external_account_label: string;
+  scopes: string[];
+  status: "active" | "expired" | "revoked" | "error";
+  last_synced_at: string | null;
+  last_error: string | null;
+};
+
+/** Status views only. There is no function that returns a credential to a caller. */
+export async function listUserConnections(
+  sql: Sql,
+  ctx: UserContext,
+): Promise<UserConnectionView[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({
+        id: schema.user_connections.id,
+        provider: schema.user_connections.provider,
+        external_account_label: schema.user_connections.external_account_label,
+        scopes: schema.user_connections.scopes,
+        status: schema.user_connections.status,
+        last_synced_at: schema.user_connections.last_synced_at,
+        last_error: schema.user_connections.last_error,
+      })
+      .from(schema.user_connections)
+      .orderBy(schema.user_connections.provider);
+    return rows.map((r) => ({
+      ...r,
+      last_synced_at: r.last_synced_at ? new Date(r.last_synced_at).toISOString() : null,
+    }));
+  });
+}
+
+export type ObligationOutcome = "drafted" | "snoozed" | "dismissed" | "resolved";
+
+/**
+ * Records what the user did about an obligation. Returns false when no such
+ * pending row is visible to this user — which is the same answer for "does
+ * not exist" and "belongs to someone else", on purpose.
+ */
+export async function setObligationOutcome(
+  sql: Sql,
+  ctx: UserContext,
+  obligationId: string,
+  outcome: ObligationOutcome,
+  snoozedUntil?: Date,
+): Promise<boolean> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .update(schema.obligations)
+      .set({
+        outcome,
+        snoozed_until: outcome === "snoozed" && snoozedUntil ? snoozedUntil.toISOString() : null,
+        updated_at: rawSql`now()`,
+      })
+      .where(
+        and(eq(schema.obligations.id, obligationId), eq(schema.obligations.outcome, "pending")),
+      )
+      .returning({ id: schema.obligations.id });
+    return rows.length === 1;
+  });
+}

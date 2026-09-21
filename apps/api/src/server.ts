@@ -53,8 +53,10 @@ import {
 } from "@maman/db";
 import { DEVICE_TOKEN_TTL_MS, signDeviceToken } from "./device-token.js";
 import { registerConnectorRoutes } from "./connectors.js";
+import { registerWorkspaceRoutes } from "./workspace.js";
 import type { RunOrchestrator } from "./orchestrator.js";
 import type { TokenTransport } from "@maman/connector-auth";
+import type { HttpTransport } from "@maman/connector-adapters";
 
 const SYNC_MIN_INTERVAL_SECONDS = 30;
 const sha256Hex = (s: string): string => createHash("sha256").update(s).digest("hex");
@@ -67,6 +69,10 @@ export type ServerDeps = {
   connectorTransport?: TokenTransport;
   /** Durable-run orchestrator (Temporal). Absent → run routes return 503. */
   orchestrator?: RunOrchestrator;
+  /** Provider API transport for /v1/me/sync (tests inject a scripted Gmail). */
+  gmailTransport?: HttpTransport;
+  /** Injectable clock, so a test can pin "now" for detection thresholds. */
+  now?: () => Date;
 };
 
 declare module "fastify" {
@@ -795,6 +801,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return { ...result, server_time: new Date().toISOString() };
   });
 
+  registerWorkspaceRoutes(app, {
+    env,
+    sql: deps.sql,
+    ...(deps.connectorTransport ? { tokenTransport: deps.connectorTransport } : {}),
+    ...(deps.gmailTransport ? { gmailTransport: deps.gmailTransport } : {}),
+    ...(deps.now ? { now: deps.now } : {}),
+  });
   registerConnectorRoutes(app, {
     env,
     sql: deps.sql,

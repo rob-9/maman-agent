@@ -31,8 +31,7 @@
     "@temporalio/workflow": "^1.11.5",
     "postgres": "^3.4.5",
     "zod": "^3.24.1",
-    "@maman/connector-adapters": "workspace:*",
-    "@maman/obligation-engine": "workspace:*"
+    "@maman/connector-adapters": "workspace:*"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",

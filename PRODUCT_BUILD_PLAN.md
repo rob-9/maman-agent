@@ -396,18 +396,20 @@ Each of these is real, found in this codebase, and cost something.
 
 ### Progress
 
-| Item                                                            | State                                                                                    |
-| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                   |
-| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd       |
-| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                  |
-| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                        |
-| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled         |
-| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills |
-| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end         |
-| CRM connector                                                   | ☐ next — find out which CRM first                                                        |
-| Web UI — ranked obligations                                     | ☐                                                                                        |
-| Draft creation                                                  | ☐                                                                                        |
+| Item                                                            | State                                                                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                            |
+| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd                |
+| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                           |
+| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                                 |
+| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled                  |
+| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills          |
+| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end                  |
+| **`/v1/me/*` — the demo path over HTTP**                        | ✅ connect Gmail → sync → ranked list → act; 11 integration tests, two users in one org; 2 drills |
+| `@maman/sync` package                                           | ✅ sync job + per-user vault, consumed by api now and worker in Phase 2                           |
+| CRM connector                                                   | ☐ next — find out which CRM first                                                                 |
+| Web UI — ranked obligations                                     | ☐ next — the API it reads from is done                                                            |
+| Draft creation                                                  | ☐                                                                                                 |
 
 **Landed defect, worth keeping:** the first RLS policy spelled the guard as
 `current_setting('app.user_id', true)::uuid`. That returns NULL only while a
@@ -468,6 +470,24 @@ dismissed thread is never re-surfaced: a reminder, not a nag.
 
 Gate at this point: lint 24/24 · typecheck 24/24 · unit 22/22 tasks ·
 integration **103** (db 63, worker 12, api 28) · build 5/5.
+
+**The API surface (`apps/api/src/workspace.ts`).** No `/v1/me/*` route takes a
+user id as a parameter: there is no legitimate reason for one person's request
+to name another's data, RLS would return nothing anyway, and not offering the
+parameter means the API cannot even express the question. Only `gmail` is
+personally connectable; org-installed connectors stay on `/v1/connectors`.
+
+A foreign or missing obligation answers **404, never 403** — a 403 confirms the
+row exists, which is exactly the fact RLS withholds. `/v1/me/sync` answers 409
+with a reason when the workspace cannot sync (no connection, expired grant),
+so the UI can offer "connect" or "reconnect" instead of a generic error.
+
+The mailbox address is learned on the first sync — Google's token response does
+not carry it without an identity scope we do not request — so one label per
+provider until then, which means one connection per provider per person.
+
+Gate at this point: lint 25/25 · typecheck 25/25 · unit 23/23 · integration
+**114** (sync 5, worker 7, db 63, api 39) · build 5/5.
 
 **Phase 1 — foundations + first value (2–3 weeks).**
 Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.

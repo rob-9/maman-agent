@@ -30,7 +30,9 @@
     "@temporalio/client": "^1.11.5",
     "@maman/agent-runtime": "workspace:*",
     "@maman/policy-engine": "workspace:*",
-    "@maman/model-provider": "workspace:*"
+    "@maman/model-provider": "workspace:*",
+    "@maman/sync": "workspace:*",
+    "@maman/connector-adapters": "workspace:*"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",
