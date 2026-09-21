@@ -476,3 +476,71 @@ export async function setObligationOutcome(
     return rows.length === 1;
   });
 }
+
+export type ObligationForDraft = {
+  obligation_id: string;
+  kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
+  reason: unknown;
+  thread: {
+    id: string;
+    external_id: string;
+    subject: string;
+    last_direction: "inbound" | "outbound";
+  };
+  contact: { id: string; external_id: string; display_name: string; account_name: string | null };
+  connection_id: string;
+};
+
+/**
+ * Everything a draft needs about ONE pending obligation, joined. Null when it
+ * is missing, already decided, or someone else's — one answer for all three.
+ */
+export async function getObligationForDraft(
+  sql: Sql,
+  ctx: UserContext,
+  obligationId: string,
+): Promise<ObligationForDraft | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx)
+      .select({
+        obligation_id: schema.obligations.id,
+        kind: schema.obligations.kind,
+        reason: schema.obligations.reason,
+        thread_id: schema.threads.id,
+        thread_external_id: schema.threads.external_id,
+        subject: schema.threads.subject,
+        last_direction: schema.threads.last_direction,
+        contact_id: schema.contacts.id,
+        contact_external_id: schema.contacts.external_id,
+        display_name: schema.contacts.display_name,
+        account_name: schema.contacts.account_name,
+        connection_id: schema.threads.connection_id,
+      })
+      .from(schema.obligations)
+      .innerJoin(schema.threads, eq(schema.threads.id, schema.obligations.thread_id))
+      .innerJoin(schema.contacts, eq(schema.contacts.id, schema.obligations.contact_id))
+      .where(
+        and(eq(schema.obligations.id, obligationId), eq(schema.obligations.outcome, "pending")),
+      )
+      .limit(1);
+    if (!row) return null;
+    return {
+      obligation_id: row.obligation_id,
+      kind: row.kind,
+      reason: row.reason,
+      thread: {
+        id: row.thread_id,
+        external_id: row.thread_external_id,
+        subject: row.subject,
+        last_direction: row.last_direction,
+      },
+      contact: {
+        id: row.contact_id,
+        external_id: row.contact_external_id,
+        display_name: row.display_name,
+        account_name: row.account_name,
+      },
+      connection_id: row.connection_id,
+    };
+  });
+}

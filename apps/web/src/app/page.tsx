@@ -1,103 +1,111 @@
-import { admin } from "@/lib/api";
+import Link from "next/link";
+import { explain, me } from "@/lib/me";
+import { dismissAction, draftAction, snoozeAction, syncAction } from "@/lib/actions";
 
 export const dynamic = "force-dynamic";
 
-function Card({ title, value, note }: { title: string; value: string; note?: string }) {
-  return (
-    <div className="card">
-      <h3>{title}</h3>
-      <div className="big">{value}</div>
-      {note && <p className="muted">{note}</p>}
-    </div>
-  );
-}
+const KIND_LABEL = {
+  awaiting_you: "Owed a reply",
+  unsent_followup: "No follow-up",
+  awaiting_them: "Gone quiet",
+} as const;
 
-export default async function OverviewPage() {
-  const overview = await admin.overview();
+export default async function InboxPage() {
+  const [obligations, connections] = await Promise.all([me.obligations(), me.connections()]);
 
-  if (!overview || overview.unavailable) {
+  if (!connections.ok || !obligations.ok) {
     return (
       <div className="card">
-        <h3>Overview</h3>
+        <h3>Not connected to the API</h3>
         <p className="muted">
-          The API is not reachable, or the organization has no data yet. Run <code>pnpm demo</code>{" "}
-          to start the stack and seed the demo organization.
+          The API is not reachable (
+          {!connections.ok ? connections.status : obligations.ok ? "" : obligations.status}). Start
+          it with <code>pnpm --filter @maman/api dev</code>.
         </p>
       </div>
     );
   }
 
-  const agents = overview.agents;
-  const agentTotal = Object.values(agents).reduce((a, b) => a + b, 0);
+  if (connections.data.connections.length === 0) {
+    return (
+      <div className="card">
+        <h3>Nothing to read yet</h3>
+        <p className="muted">
+          Connect your mailbox and this page becomes the list of people you&apos;re about to drop —
+          ranked, and with the reason on every card. Nothing to configure.
+        </p>
+        <Link className="button" href="/connections">
+          Connect Gmail
+        </Link>
+      </div>
+    );
+  }
 
+  const items = obligations.data.obligations;
   return (
     <>
-      <h1>Organization overview</h1>
-      <p className="muted">
-        Aggregate figures only. No screen content, no individual activity, no productivity ranking —
-        those never leave the employee&apos;s device.
-      </p>
-
-      <div className="grid" style={{ marginTop: 16 }}>
-        <Card
-          title="Active seats"
-          value={`${overview.seats.active_users}/${overview.seats.provisioned}`}
-          note="active of provisioned"
-        />
-        <Card
-          title="Devices healthy"
-          value={String(overview.devices.healthy)}
-          note={`${overview.devices.offline} offline`}
-        />
-        <Card
-          title="Recommendations"
-          value={String(overview.recommendations.created)}
-          note={`${overview.recommendations.accepted} accepted · ${overview.recommendations.dismissed} dismissed`}
-        />
-        <Card
-          title="Agents"
-          value={String(agentTotal)}
-          note={Object.entries(agents)
-            .map(([s, n]) => `${n} ${s}`)
-            .join(" · ")}
-        />
-        <Card
-          title="Run success"
-          value={`${overview.runs.completed}/${overview.runs.total}`}
-          note={`${overview.runs.failed} failed`}
-        />
-        {overview.value.suppressed ? (
-          <Card title="Verified hours" value="—" note={overview.value.reason} />
-        ) : (
-          <>
-            <Card
-              title="Verified hours returned"
-              value={overview.value.verified_hours.toFixed(1)}
-              note={`across ${overview.value.cohort_size} active users`}
-            />
-            <Card
-              title="Net value"
-              value={`$${overview.value.net_value_usd.toFixed(2)}`}
-              note="verified value minus cost"
-            />
-          </>
-        )}
-        <Card
-          title="Cost"
-          value={`$${(overview.cost.model_usd + overview.cost.connector_usd).toFixed(2)}`}
-          note={`model $${overview.cost.model_usd.toFixed(2)} · connector $${overview.cost.connector_usd.toFixed(2)}`}
-        />
-        <Card
-          title="Policy blocks"
-          value={String(overview.policy_blocks)}
-          note="unapproved actions prevented"
-        />
-        <Card
-          title="Connectors"
-          value={String(overview.connectors_needing_attention)}
-          note="needing attention"
-        />
+      <div className="row">
+        <div>
+          <h1>Who you&apos;re about to drop</h1>
+          <p className="muted">
+            {items.length === 0
+              ? "Nothing pending. You're caught up."
+              : `${items.length} ${items.length === 1 ? "thread" : "threads"}, most urgent first.`}
+          </p>
+        </div>
+        <form action={syncAction}>
+          <button className="button secondary" type="submit">
+            Check now
+          </button>
+        </form>
       </div>
+
+      <div className="stack">
+        {items.map((o) => {
+          const why = explain(o);
+          return (
+            <div className="card item" key={o.id}>
+              <div className="item-main">
+                <span className={`pill ${o.kind}`}>{KIND_LABEL[o.kind]}</span>
+                <h3>{why.headline}</h3>
+                <p className="muted">{why.detail}</p>
+                <p className="fine">
+                  {o.contact_account_name ? `${o.contact_account_name} · ` : ""}
+                  {o.reason.message_count} {o.reason.message_count === 1 ? "message" : "messages"}
+                  {o.reason.has_open_deal === null
+                    ? " · deal state unknown (no CRM connected)"
+                    : ""}
+                  {o.reason.open_deal_value !== undefined
+                    ? ` · $${o.reason.open_deal_value.toLocaleString()} open`
+                    : ""}
+                </p>
+              </div>
+              <div className="item-actions">
+                <form action={draftAction.bind(null, o.id)}>
+                  <button className="button" type="submit">
+                    Draft follow-up
+                  </button>
+                </form>
+                <form action={snoozeAction.bind(null, o.id)}>
+                  <button className="button secondary" type="submit">
+                    Snooze 3 days
+                  </button>
+                </form>
+                <form action={dismissAction.bind(null, o.id)}>
+                  <button className="button quiet" type="submit">
+                    Not needed
+                  </button>
+                </form>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="fine" style={{ marginTop: 24 }}>
+        &ldquo;Draft follow-up&rdquo; writes a draft to your Gmail Drafts folder. Nothing is sent
+        until you open it and press Send yourself.
+      </p>
     </>
   );
 }

@@ -39,3 +39,9 @@ export {
   type GmailSyncResult,
 } from "./gmail.js";
 export type { UserCredentialKey, UserCredentialProvider } from "./credentials.js";
+export {
+  buildRawMessage,
+  createGmailDraft,
+  type DraftMessage,
+  type CreateDraftResult,
+} from "./gmail-draft.js";

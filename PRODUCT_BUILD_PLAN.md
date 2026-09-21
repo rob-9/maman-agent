@@ -396,20 +396,20 @@ Each of these is real, found in this codebase, and cost something.
 
 ### Progress
 
-| Item                                                            | State                                                                                             |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                            |
-| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd                |
-| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                           |
-| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                                 |
-| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled                  |
-| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills          |
-| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end                  |
-| **`/v1/me/*` — the demo path over HTTP**                        | ✅ connect Gmail → sync → ranked list → act; 11 integration tests, two users in one org; 2 drills |
-| `@maman/sync` package                                           | ✅ sync job + per-user vault, consumed by api now and worker in Phase 2                           |
-| CRM connector                                                   | ☐ next — find out which CRM first                                                                 |
-| Web UI — ranked obligations                                     | ☐ next — the API it reads from is done                                                            |
-| Draft creation                                                  | ☐                                                                                                 |
+| Item                                                            | State                                                                                                                       |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                                                      |
+| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd                                          |
+| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                                                     |
+| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                                                           |
+| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled                                            |
+| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills                                    |
+| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end                                            |
+| **`/v1/me/*` — the demo path over HTTP**                        | ✅ connect Gmail → sync → ranked list → act; 11 integration tests, two users in one org; 2 drills                           |
+| `@maman/sync` package                                           | ✅ sync job + per-user vault, consumed by api now and worker in Phase 2                                                     |
+| CRM connector                                                   | ☐ next — find out which CRM first                                                                                           |
+| Web UI — Inbox + Connections                                    | ✅ `apps/web` is the product; server components + server actions, identity never in the browser; admin moved under `/admin` |
+| Draft creation (`gmail.compose`, never send)                    | ✅ `gmail-draft.ts` + `voice-engine` deterministic composer + `POST /v1/me/obligations/:id/draft`; failure branch tested    |
 
 **Landed defect, worth keeping:** the first RLS policy spelled the guard as
 `current_setting('app.user_id', true)::uuid`. That returns NULL only while a
@@ -488,6 +488,31 @@ provider until then, which means one connection per provider per person.
 
 Gate at this point: lint 25/25 · typecheck 25/25 · unit 23/23 · integration
 **114** (sync 5, worker 7, db 63, api 39) · build 5/5.
+
+**Drafts and the inbox.** The first write is a Gmail DRAFT: reversible and
+human-reviewed by construction, so it needs none of the verification a CRM
+write does, and the scope cannot send even if the code tried (tests pin that no
+request ever targets a send endpoint). The RFC 2822 builder strips CR/LF from
+every header — `Subject: x\r\nBcc: attacker` would be a send hiding inside a
+draft — pinned by asserting the exact header names. The obligation is marked
+`drafted` only AFTER Gmail confirms; the failure branch is tested (Gmail 500 →
+the item stays pending).
+
+`voice-engine` is deterministic for now, behind a `DraftComposer` interface the
+model version implements later. Its one rule, model or not: **never invent a
+fact.** With `gmail.metadata` we know subject, who, and how long — not what was
+said — so the draft names the gap and stops. It never guesses a first name from
+an address ("Hi sarah," reads as a bot).
+
+The web app renders the reason sentence from the detector's FACTS, so copy can
+never disagree with arithmetic. Dev identity is `MAMAN_DEV_ORG_ID` /
+`MAMAN_DEV_USER_ID`, refused by the API outside `AUTH_MODE=dev`; real auth
+replaces one function.
+
+**Phase 1 remaining:** CRM connector (which one?), real auth, scheduled sweeps.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**117** (sync 5, worker 7, db 63, api 42) · build 5/5.
 
 **Phase 1 — foundations + first value (2–3 weeks).**
 Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.

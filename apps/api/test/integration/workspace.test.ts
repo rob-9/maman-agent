@@ -108,9 +108,16 @@ const MAILBOX: Record<string, unknown> = {
   waiting: gmailThread("waiting", "alice@co.example", "bob@client.com", ago(9), "Proposal"),
 };
 const gmailRequests: HttpRequest[] = [];
+/** Flip to make Gmail refuse the next draft, to prove the failure branch. */
+let draftStatus = 200;
 const gmailTransport = async (req: HttpRequest): Promise<HttpResponse> => {
   gmailRequests.push(req);
   const url = new URL(req.url);
+  if (req.method === "POST" && url.pathname.endsWith("/drafts")) {
+    return draftStatus === 200
+      ? { status: 200, headers: {}, body: { id: "draft-1", message: { id: "msg-1" } } }
+      : { status: draftStatus, headers: {}, body: { error: { message: "quota" } } };
+  }
   if (url.pathname.endsWith("/profile")) {
     return { status: 200, headers: {}, body: { emailAddress: "alice@co.example" } };
   }
@@ -321,6 +328,99 @@ describe("/v1/me — the demo path", () => {
     await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
     const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
     expect((list.json().obligations as unknown[]).length).toBe(1);
+  });
+
+  it("drafting creates a Gmail DRAFT — never a send — and marks the obligation drafted", async () => {
+    const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
+    const target = (list.json().obligations as Array<{ id: string; subject: string }>)[0]!;
+    const before = gmailRequests.length;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${target.id}/draft`,
+      headers: as(alice),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      obligation_id: target.id,
+      draft_id: "draft-1",
+      subject: `Re: ${target.subject}`,
+      composer: "deterministic",
+    });
+
+    // Exactly one new Gmail call, a POST to /drafts, with the LIVE token, and
+    // nothing to any send endpoint.
+    const news = gmailRequests.slice(before);
+    expect(news).toHaveLength(1);
+    expect(news[0]!.method).toBe("POST");
+    expect(news[0]!.url).toMatch(/\/drafts$/);
+    expect(news[0]!.headers["authorization"]).toBe("Bearer live-token");
+    expect(gmailRequests.every((r) => !/\/send\b/.test(r.url))).toBe(true);
+    // The draft is filed on the thread it answers.
+    const sent = JSON.parse(news[0]!.body!) as { message: { threadId?: string } };
+    expect(sent.message.threadId).toBeTruthy();
+
+    // It left the pending list, and the next sync does not bring it back.
+    const after = await app.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: as(alice),
+    });
+    expect(
+      (after.json().obligations as Array<{ id: string }>).some((o) => o.id === target.id),
+    ).toBe(false);
+    await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
+    const again = await app.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: as(alice),
+    });
+    expect(
+      (again.json().obligations as Array<{ id: string }>).some((o) => o.id === target.id),
+    ).toBe(false);
+  });
+
+  it("when Gmail refuses the draft, the obligation STAYS pending — never 'drafted' pointing at nothing", async () => {
+    // THE HONEST HALF of "marked after Gmail confirms". Without this branch
+    // tested, the claim is a comment.
+    //
+    // Earlier tests drafted or snoozed everything; put the drafted one back so
+    // there is a pending item to fail against.
+    await withUser(client.sql, { organizationId: orgId, userId: alice }, async (tx) => {
+      await tx`UPDATE obligations SET outcome = 'pending' WHERE outcome = 'drafted'`;
+    });
+    const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
+    expect((list.json().obligations as unknown[]).length).toBeGreaterThan(0);
+    const target = (list.json().obligations as Array<{ id: string }>)[0]!;
+    draftStatus = 500;
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `/v1/me/obligations/${target.id}/draft`,
+        headers: as(alice),
+      });
+      expect(res.statusCode).toBeGreaterThanOrEqual(500);
+      expect(res.body).not.toContain("live-token");
+    } finally {
+      draftStatus = 200;
+    }
+    const after = await app.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: as(alice),
+    });
+    expect(
+      (after.json().obligations as Array<{ id: string }>).some((o) => o.id === target.id),
+    ).toBe(true);
+  });
+
+  it("Bob cannot draft against Alice's obligation — 404", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${obligationId}/draft`,
+      headers: as(bob),
+    });
+    expect(res.statusCode).toBe(404);
   });
 
   it("rejects an unknown outcome", async () => {

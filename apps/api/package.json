@@ -32,7 +32,8 @@
     "@maman/policy-engine": "workspace:*",
     "@maman/model-provider": "workspace:*",
     "@maman/sync": "workspace:*",
-    "@maman/connector-adapters": "workspace:*"
+    "@maman/connector-adapters": "workspace:*",
+    "@maman/voice-engine": "workspace:*"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",

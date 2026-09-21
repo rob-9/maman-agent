@@ -4,17 +4,13 @@ import { branding } from "@/lib/api";
 import "./globals.css";
 
 export const metadata = {
-  title: `${branding.name} Admin`,
-  description: "Aggregate adoption, cost, value, and audit for the organization.",
+  title: branding.name,
+  description: "Who you're about to drop, and a draft to fix it.",
 };
 
 const NAV = [
-  ["Overview", "/"],
-  ["Agents", "/agents"],
-  ["Policies", "/policies"],
-  ["Budgets", "/budgets"],
-  ["Audit", "/audit"],
-  ["Privacy", "/privacy"],
+  ["Inbox", "/"],
+  ["Connections", "/connections"],
 ] as const;
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -22,7 +18,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en">
       <body>
         <nav className="top">
-          <span className="brand">{branding.name} Admin</span>
+          <span className="brand">{branding.name}</span>
           {NAV.map(([label, href]) => (
             <Link key={href} href={href}>
               {label}

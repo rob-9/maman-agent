@@ -44,4 +44,6 @@ export {
   setObligationOutcome,
   type UserConnectionView,
   type ObligationOutcome,
+  getObligationForDraft,
+  type ObligationForDraft,
 } from "./workspace.js";
