@@ -12,7 +12,13 @@
 # portable crate without pretending it can build a macOS-only app.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$HOME/.cargo/env" 2>/dev/null || true
+# Only source it if it EXISTS. `source` of a missing file is fatal under
+# `set -e` in bash 3.2 — which is what macOS still ships as /bin/bash — and the
+# `|| true` does not rescue it, because the builtin's failure exits the shell
+# before the list is evaluated. The symptom was this script exiting 1 with no
+# output at all on any machine whose Rust came from Homebrew's (keg-only)
+# rustup, which never writes ~/.cargo/env.
+[[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
 declare -a SELECTED
 if [[ $# -gt 0 ]]; then

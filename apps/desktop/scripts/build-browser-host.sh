@@ -21,7 +21,11 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 0
 fi
 
-TRIPLE="$(rustc -vV 2>/dev/null | awk '/host:/ {print $2}')"
+# `set -o pipefail` + `set -e` makes this assignment FATAL when rustc is absent
+# (127 propagates out of the pipeline), so the fallback below could never run —
+# the script died silently at exactly the moment its fallback existed for.
+# `|| true` keeps the assignment non-fatal and lets the empty check decide.
+TRIPLE="$(rustc -vV 2>/dev/null | awk '/host:/ {print $2}' || true)"
 if [[ -z "$TRIPLE" ]]; then
   ARCH="$(uname -m)"; [[ "$ARCH" == "arm64" ]] && ARCH="aarch64"
   TRIPLE="${ARCH}-apple-darwin"

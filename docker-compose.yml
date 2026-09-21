@@ -59,8 +59,16 @@ services:
       - "8233:8080"
 
   # MinIO is used only for generated exports and test fixtures.
+  #
+  # quay.io, not Docker Hub: `minio/minio` there now answers "pull access denied
+  # for minio/minio, repository does not exist or may require 'docker login'",
+  # which took `pnpm demo` and `pnpm infra:up` down with it — compose aborts the
+  # whole stack when one image cannot be pulled, so an unrelated service being
+  # republished stopped postgres, redis and temporal from starting at all.
+  #
+  # PINNED, because `:latest` is what made this a surprise rather than a choice.
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: maman

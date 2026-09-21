@@ -18,6 +18,21 @@
 set -euo pipefail
 
 CERT_NAME="Maman Dev"
+# macOS' `security import` cannot read a PKCS#12 written with OpenSSL 3's
+# default PBE algorithms (AES-256-CBC + SHA-256): it fails with the misleading
+# "MAC verification failed during PKCS12 import (wrong password?)" even though
+# the password is correct. Homebrew puts OpenSSL 3 ahead of the system LibreSSL
+# on PATH, so this bites on any machine with `brew install openssl` — and the
+# failure was swallowed by a `>/dev/null 2>&1`, leaving the script reporting no
+# identity while exiting 0. Prefer the system binary, which writes the legacy
+# format `security` accepts; fall back to `-legacy` on an OpenSSL 3 build.
+if [[ -x /usr/bin/openssl ]]; then
+  OPENSSL=/usr/bin/openssl
+  P12_COMPAT=()
+else
+  OPENSSL="$(command -v openssl)"
+  P12_COMPAT=(-legacy)
+fi
 KEYCHAIN="$HOME/Library/Keychains/maman-dev.keychain-db"
 KEYCHAIN_PASS="maman-dev" # local signing keychain only — not a secret
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,7 +51,7 @@ ensure_identity() {
   echo "== creating self-signed '$CERT_NAME' code-signing identity"
   local tmp
   tmp="$(mktemp -d)"
-  openssl genrsa -out "$tmp/key.pem" 2048 >/dev/null 2>&1
+  "$OPENSSL" genrsa -out "$tmp/key.pem" 2048 >/dev/null 2>&1
   cat > "$tmp/cfg" <<'CFG'
 [req]
 distinguished_name=dn
@@ -49,8 +64,8 @@ basicConstraints=critical,CA:false
 keyUsage=critical,digitalSignature
 extendedKeyUsage=critical,codeSigning
 CFG
-  openssl req -x509 -new -key "$tmp/key.pem" -days 3650 -out "$tmp/cert.pem" -config "$tmp/cfg" >/dev/null 2>&1
-  openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
+  "$OPENSSL" req -x509 -new -key "$tmp/key.pem" -days 3650 -out "$tmp/cert.pem" -config "$tmp/cfg" >/dev/null 2>&1
+  "$OPENSSL" pkcs12 -export "${P12_COMPAT[@]+"${P12_COMPAT[@]}"}" -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
     -out "$tmp/md.p12" -passout "pass:$KEYCHAIN_PASS" -name "$CERT_NAME" >/dev/null 2>&1
 
   if [[ ! -f "$KEYCHAIN" ]]; then
