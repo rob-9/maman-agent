@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { Client, Connection } from "@temporalio/client";
 import { Worker, NativeConnection } from "@temporalio/worker";
 import { loadServerEnv } from "@maman/config";
 import {
@@ -7,11 +8,17 @@ import {
   demoAdapterRegistry,
   type CapabilityAdapter,
 } from "@maman/agent-runtime";
-import { MemoryIdempotencyStore, realAdapterRegistry } from "@maman/connector-adapters";
+import {
+  fetchTransport,
+  MemoryIdempotencyStore,
+  realAdapterRegistry,
+} from "@maman/connector-adapters";
 import { createDbClient } from "@maman/db";
 import { createConnectorTokenTransport } from "@maman/connector-auth";
 import { createActivities, type PersistenceSink } from "./activities.js";
+import { createSweepActivities, createUserVaultCredentialProvider } from "@maman/sync";
 import { createVaultCredentialProvider } from "./vault-credentials.js";
+import { DEFAULT_SWEEP_INTERVAL_MINUTES, ensureSweepSchedule } from "./schedule.js";
 
 /**
  * Temporal worker process. Registers agentRunWorkflow and the activity
@@ -21,18 +28,26 @@ import { createVaultCredentialProvider } from "./vault-credentials.js";
  * CONNECTOR_MODE selects the capability registry: `demo` uses the deterministic
  * in-process adapters; `real` uses live connectors (vault tokens) and falls
  * back per capability to the demo adapter when an org has no linked connector.
+ *
+ * The worker also owns the WORKSPACE SWEEP: on a schedule it syncs every
+ * connected mailbox and re-runs detection, so the inbox is current without
+ * anyone pressing "sync". The schedule is registered at startup (schedule.ts)
+ * and the activities come from @maman/sync — the same job the API runs on
+ * demand, so the two can never drift.
  */
 
 const env = loadServerEnv(process.env);
 const require = createRequire(import.meta.url);
+const TASK_QUEUE = "maman-agent-runs";
+
+const { sql } = createDbClient(env.DATABASE_URL);
+const masterKey = createHash("sha256").update(env.CONNECTOR_ENCRYPTION_MASTER_KEY).digest();
 
 /** Builds the capability registry for the worker per CONNECTOR_MODE. */
 function buildRegistry(): Map<string, CapabilityAdapter> {
   const demo = demoAdapterRegistry(new DemoSalesforceWorld());
   if (env.CONNECTOR_MODE !== "real") return demo;
 
-  const { sql } = createDbClient(env.DATABASE_URL);
-  const masterKey = createHash("sha256").update(env.CONNECTOR_ENCRYPTION_MASTER_KEY).digest();
   const credentials = createVaultCredentialProvider({
     sql,
     masterKey,
@@ -98,20 +113,56 @@ const sink: PersistenceSink = {
   },
 };
 
+/** The sweep's activities: the on-demand sync job, run per person from the schedule. */
+function buildSweepActivities() {
+  return createSweepActivities({
+    sql,
+    credentials: createUserVaultCredentialProvider({
+      sql,
+      masterKey,
+      transport: createConnectorTokenTransport(),
+      clientCredentials: (provider) =>
+        provider === "gmail" && env.GOOGLE_CLIENT_ID
+          ? {
+              client_id: env.GOOGLE_CLIENT_ID,
+              ...(env.GOOGLE_CLIENT_SECRET ? { client_secret: env.GOOGLE_CLIENT_SECRET } : {}),
+            }
+          : null,
+    }),
+    transport: fetchTransport,
+    now: () => new Date(),
+  });
+}
+
 async function run(): Promise<void> {
   const connection = await NativeConnection.connect({ address: env.TEMPORAL_ADDRESS });
   const worker = await Worker.create({
     connection,
     namespace: env.TEMPORAL_NAMESPACE,
-    taskQueue: "maman-agent-runs",
-    workflowsPath: require.resolve("@maman/agent-runtime/workflow"),
-    activities: createActivities({
-      registry: buildRegistry(),
-      sink,
-      now: () => new Date(),
-    }),
+    taskQueue: TASK_QUEUE,
+    // One entry module carries every workflow this worker runs.
+    workflowsPath: require.resolve("@maman/sync/workflows"),
+    activities: {
+      ...createActivities({
+        registry: buildRegistry(),
+        sink,
+        now: () => new Date(),
+      }),
+      ...buildSweepActivities(),
+    },
   });
-  console.warn(JSON.stringify({ evt: "worker_ready", queue: "maman-agent-runs" }));
+
+  const client = new Client({
+    connection: await Connection.connect({ address: env.TEMPORAL_ADDRESS }),
+    namespace: env.TEMPORAL_NAMESPACE,
+  });
+  const everyMinutes = env.WORKSPACE_SWEEP_INTERVAL_MINUTES ?? DEFAULT_SWEEP_INTERVAL_MINUTES;
+  const schedule = await ensureSweepSchedule(client, { taskQueue: TASK_QUEUE, everyMinutes });
+  console.warn(
+    JSON.stringify({ evt: "sweep_schedule", outcome: schedule, every_minutes: everyMinutes }),
+  );
+
+  console.warn(JSON.stringify({ evt: "worker_ready", queue: TASK_QUEUE }));
   await worker.run();
 }
 

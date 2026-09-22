@@ -46,6 +46,14 @@ export const serverEnvSchema = z
     GOOGLE_CLIENT_SECRET: z.string().optional(),
     GOOGLE_REDIRECT_URI: z.string().optional(),
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+    /**
+     * How often the worker sweeps every connected mailbox for new obligations.
+     * Bounded: never faster than a minute (provider quotas), never slower than
+     * a day (a list that updates less often than that is not a list). Unset
+     * means the worker's default (schedule.ts), so a hand-written env in a
+     * test does not have to know about the sweep.
+     */
+    WORKSPACE_SWEEP_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production") {

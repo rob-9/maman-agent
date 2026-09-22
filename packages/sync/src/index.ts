@@ -6,3 +6,10 @@
  */
 export { createUserVaultCredentialProvider, type UserVaultDeps } from "./user-vault-credentials.js";
 export { runGmailSyncJob, type GmailSyncJobDeps, type GmailSyncJobResult } from "./sync-gmail.js";
+export { createSweepActivities, listSweepTargets } from "./sweep.js";
+export type {
+  SweepActivities,
+  SweepOutcome,
+  SweepTarget,
+  WorkspaceSweepResult,
+} from "./workflow.js";

@@ -411,6 +411,7 @@ Each of these is real, found in this codebase, and cost something.
 | Web UI — Inbox + Connections                                    | ✅ `apps/web` is the product; server components + server actions, identity never in the browser; admin moved under `/admin`                      |
 | Draft creation (`gmail.compose`, never send)                    | ✅ `gmail-draft.ts` + `voice-engine` deterministic composer + `POST /v1/me/obligations/:id/draft`; failure branch tested                         |
 | Real auth (WorkOS AuthKit)                                      | ✅ `apps/api/src/workos.ts` JWKS verifier + JIT-provisioning resolver; web sign-in/out via `authkit-nextjs`; 12 unit + 12 integration, 3 drilled |
+| Scheduled sweeps (worker)                                       | ✅ `workspaceSweepWorkflow` + `listSweepTargets` inside RLS + Temporal Schedule (SKIP overlap); 5 + 4 integration, 3 drilled                     |
 
 **Landed defect, worth keeping:** the first RLS policy spelled the guard as
 `current_setting('app.user_id', true)::uuid`. That returns NULL only while a
@@ -559,6 +560,46 @@ logout redirect `/signed-out`), documented in `.env.example`.
 
 Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
 **129** (sync 5, worker 7, db 63, api 54) · build 5/5.
+
+**Scheduled sweeps.** The inbox is now current without anyone pressing
+"sync": a Temporal Schedule (`workspace-sweep`, every 15 minutes by default,
+`WORKSPACE_SWEEP_INTERVAL_MINUTES` to change it, bounded 1..1440) starts
+`workspaceSweepWorkflow`, which runs THE SAME sync job the API runs on demand
+(`@maman/sync`), once per connected mailbox. Two shapes worth keeping:
+
+- **Finding whom to sweep does not bypass RLS.** The only cross-tenant read
+  is the list of active organization ids; memberships are read under each
+  organization's scope and connections under each person's. A person is a
+  target only if their membership is active AND their mailbox connection is
+  active — a suspended member's mailbox is not swept whatever their row
+  says, and a mailbox that errored drops out of the next sweep until the
+  person reconnects. Two organizations, six people in six states, one test
+  per exclusion.
+- **A bad mailbox is an outcome, not an exception.** The job records the
+  failure on the person's connection (where the UI asks them to reconnect)
+  and answers with a reason; the workflow counts it and moves on to the
+  next person. Only infrastructure failures retry (3×), and even those are
+  caught per person so one mailbox can never stop the people after it.
+  Sequential by design: a team is tens of people, and Gmail's per-user
+  quotas prefer a queue to a burst.
+
+The schedule is created on worker startup and brought up to date if it
+exists, so the interval in configuration is the interval that runs.
+`overlap: SKIP` — a tick arriving mid-sweep is dropped, not queued; two
+sweeps of the same rows would only race each other. `catchupWindow: 1m` — a
+worker down for an hour runs one sweep on return, not four. Tested against a
+real Temporal dev server (`TestWorkflowEnvironment.createLocal`), not only
+the time-skipping one, because schedules exist only on a real server.
+
+One worker, one workflow entry module: `@maman/sync/workflows` re-exports
+the agent-run workflow and the sweep, since Temporal bundles exactly one.
+
+**Phase 1 remaining:** CRM connector (which one?). Then Phase 1's exit —
+"a team member logs in, connects two systems, and sees a real ranked list
+with zero configuration" — is reachable end to end.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**138** (sync 10, worker 11, db 63, api 54) · build 5/5.
 
 **Phase 1 — foundations + first value (2–3 weeks).**
 Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.

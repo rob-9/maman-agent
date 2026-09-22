@@ -47,6 +47,19 @@ export async function globalGetOrganizationByWorkosId(sql: Sql, workosOrganizati
 }
 
 /**
+ * Every active organization, oldest first. The one legitimate cross-tenant
+ * read: a scheduled sweep has to know whom to sweep. It returns ids only;
+ * everything after it runs inside each organization's own tenant scope.
+ */
+export async function globalListActiveOrganizations(sql: Sql): Promise<{ id: string }[]> {
+  return drizzle(sql)
+    .select({ id: schema.organizations.id })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.status, "active"))
+    .orderBy(schema.organizations.created_at, schema.organizations.id);
+}
+
+/**
  * Just-in-time provisioning for sign-in. Insert-if-absent then read, so two
  * first requests racing for the same person (a page that fetches twice) end
  * with ONE row and both callers holding it. The identity provider is the

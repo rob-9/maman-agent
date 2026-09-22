@@ -75,6 +75,19 @@ describe("loadServerEnv", () => {
     ).toThrow(EnvValidationError);
   });
 
+  it("bounds the sweep interval and coerces it from the environment string", () => {
+    expect(loadServerEnv(validDev).WORKSPACE_SWEEP_INTERVAL_MINUTES).toBeUndefined();
+    expect(
+      loadServerEnv({ ...validDev, WORKSPACE_SWEEP_INTERVAL_MINUTES: "20" })
+        .WORKSPACE_SWEEP_INTERVAL_MINUTES,
+    ).toBe(20);
+    for (const bad of ["0", "1441", "2.5", "soon"]) {
+      expect(() => loadServerEnv({ ...validDev, WORKSPACE_SWEEP_INTERVAL_MINUTES: bad })).toThrow(
+        EnvValidationError,
+      );
+    }
+  });
+
   it("rejects short signing secrets", () => {
     expect(() => loadServerEnv({ ...validDev, DEVICE_TOKEN_SIGNING_SECRET: "short" })).toThrow(
       EnvValidationError,
