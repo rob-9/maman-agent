@@ -71,6 +71,8 @@ export type ServerDeps = {
   orchestrator?: RunOrchestrator;
   /** Provider API transport for /v1/me/sync (tests inject a scripted Gmail). */
   gmailTransport?: HttpTransport;
+  /** CRM transport for the deal step of /v1/me/sync (tests inject a scripted Salesforce). */
+  crmTransport?: HttpTransport;
   /** Injectable clock, so a test can pin "now" for detection thresholds. */
   now?: () => Date;
 };
@@ -806,6 +808,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     sql: deps.sql,
     ...(deps.connectorTransport ? { tokenTransport: deps.connectorTransport } : {}),
     ...(deps.gmailTransport ? { gmailTransport: deps.gmailTransport } : {}),
+    ...(deps.crmTransport ? { crmTransport: deps.crmTransport } : {}),
     ...(deps.now ? { now: deps.now } : {}),
   });
   registerConnectorRoutes(app, {

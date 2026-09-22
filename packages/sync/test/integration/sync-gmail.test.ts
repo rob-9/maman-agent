@@ -276,7 +276,7 @@ describe("with a CRM connected — the deal step", () => {
   const ctx = { organizationId: orgId, userId: alice };
 
   it("asks about exactly this person's contacts and ranks the confirmed deal higher", async () => {
-    const result = await runGmailSyncJob({ ...deps(), deals: crm("answer") }, ctx);
+    const result = await runGmailSyncJob({ ...deps(), deals: async () => crm("answer") }, ctx);
     expect(result.ok && result.deals).toEqual({
       ok: true,
       provider: "fake_crm",
@@ -303,7 +303,7 @@ describe("with a CRM connected — the deal step", () => {
   });
 
   it("a CRM that is down does not take the mailbox down: the sync completes on the last known state", async () => {
-    const result = await runGmailSyncJob({ ...deps(), deals: crm("down") }, ctx);
+    const result = await runGmailSyncJob({ ...deps(), deals: async () => crm("down") }, ctx);
     expect(result.ok).toBe(true);
     expect(result.ok && result.deals).toEqual({
       ok: false,

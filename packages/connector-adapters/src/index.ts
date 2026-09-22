@@ -46,3 +46,8 @@ export {
   type CreateDraftResult,
 } from "./gmail-draft.js";
 export type { DealAnswer, DealSignal, DealSource } from "./deals.js";
+export {
+  salesforceDealSource,
+  SF_DEAL_QUERY_CHUNK,
+  type SalesforceDealSourceConfig,
+} from "./salesforce-deals.js";

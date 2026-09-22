@@ -16,7 +16,11 @@ import {
 import { createDbClient } from "@maman/db";
 import { createConnectorTokenTransport } from "@maman/connector-auth";
 import { createActivities, type PersistenceSink } from "./activities.js";
-import { createSweepActivities, createUserVaultCredentialProvider } from "@maman/sync";
+import {
+  createSweepActivities,
+  createUserVaultCredentialProvider,
+  resolveDealSource,
+} from "@maman/sync";
 import { createVaultCredentialProvider } from "./vault-credentials.js";
 import { DEFAULT_SWEEP_INTERVAL_MINUTES, ensureSweepSchedule } from "./schedule.js";
 
@@ -43,6 +47,25 @@ const TASK_QUEUE = "maman-agent-runs";
 const { sql } = createDbClient(env.DATABASE_URL);
 const masterKey = createHash("sha256").update(env.CONNECTOR_ENCRYPTION_MASTER_KEY).digest();
 
+/** OAuth client for an ORG-installed connector, from configuration. */
+function orgClientCredentials(
+  provider: string,
+): { client_id: string; client_secret?: string } | null {
+  if (provider === "salesforce" && env.SALESFORCE_CLIENT_ID) {
+    return {
+      client_id: env.SALESFORCE_CLIENT_ID,
+      ...(env.SALESFORCE_CLIENT_SECRET ? { client_secret: env.SALESFORCE_CLIENT_SECRET } : {}),
+    };
+  }
+  if (provider === "google_sheets" && env.GOOGLE_CLIENT_ID) {
+    return {
+      client_id: env.GOOGLE_CLIENT_ID,
+      ...(env.GOOGLE_CLIENT_SECRET ? { client_secret: env.GOOGLE_CLIENT_SECRET } : {}),
+    };
+  }
+  return null;
+}
+
 /** Builds the capability registry for the worker per CONNECTOR_MODE. */
 function buildRegistry(): Map<string, CapabilityAdapter> {
   const demo = demoAdapterRegistry(new DemoSalesforceWorld());
@@ -52,21 +75,7 @@ function buildRegistry(): Map<string, CapabilityAdapter> {
     sql,
     masterKey,
     transport: createConnectorTokenTransport(),
-    clientCredentials: (provider) => {
-      if (provider === "salesforce" && env.SALESFORCE_CLIENT_ID) {
-        return {
-          client_id: env.SALESFORCE_CLIENT_ID,
-          ...(env.SALESFORCE_CLIENT_SECRET ? { client_secret: env.SALESFORCE_CLIENT_SECRET } : {}),
-        };
-      }
-      if (provider === "google_sheets" && env.GOOGLE_CLIENT_ID) {
-        return {
-          client_id: env.GOOGLE_CLIENT_ID,
-          ...(env.GOOGLE_CLIENT_SECRET ? { client_secret: env.GOOGLE_CLIENT_SECRET } : {}),
-        };
-      }
-      return null;
-    },
+    clientCredentials: orgClientCredentials,
   });
   return realAdapterRegistry({
     credentials,
@@ -131,6 +140,17 @@ function buildSweepActivities() {
     }),
     transport: fetchTransport,
     now: () => new Date(),
+    // The organization's CRM (org vault), asked about each person's contacts.
+    deals: resolveDealSource({
+      sql,
+      credentials: createVaultCredentialProvider({
+        sql,
+        masterKey,
+        transport: createConnectorTokenTransport(),
+        clientCredentials: orgClientCredentials,
+      }),
+      transport: fetchTransport,
+    }),
   });
 }
 

@@ -12,10 +12,16 @@ import {
   globalCreateUser,
   loadMigrations,
   migrateUp,
+  upsertConnectorAccount,
   withUser,
   type DbClient,
 } from "@maman/db";
-import { envelopeDecrypt, unpackEnvelope, type TokenTransport } from "@maman/connector-auth";
+import {
+  envelopeDecrypt,
+  envelopeEncrypt,
+  unpackEnvelope,
+  type TokenTransport,
+} from "@maman/connector-auth";
 import type { HttpRequest, HttpResponse } from "@maman/connector-adapters";
 import type { ServerEnv } from "@maman/config";
 import { buildServer } from "../../src/server.js";
@@ -132,6 +138,25 @@ const gmailTransport = async (req: HttpRequest): Promise<HttpResponse> => {
   return { status: 200, headers: {}, body: MAILBOX[id] };
 };
 
+/** The organization's Salesforce, scripted: Bob is on a $40K open opportunity. */
+const crmRequests: HttpRequest[] = [];
+const crmTransport = async (req: HttpRequest): Promise<HttpResponse> => {
+  crmRequests.push(req);
+  return {
+    status: 200,
+    headers: {},
+    body: {
+      done: true,
+      records: [
+        {
+          Contact: { Email: "bob@client.com", Account: { Name: "Client Co" } },
+          Opportunity: { Amount: 40_000, IsClosed: false },
+        },
+      ],
+    },
+  };
+};
+
 beforeAll(async () => {
   container = await new PostgreSqlContainer("postgres:17-alpine").start();
   client = createDbClient(container.getConnectionUri(), { max: 4 });
@@ -160,6 +185,7 @@ beforeAll(async () => {
     sql: client.sql,
     connectorTransport: tokenTransport,
     gmailTransport,
+    crmTransport,
     now: () => NOW,
   });
   await app.ready();
@@ -431,5 +457,80 @@ describe("/v1/me — the demo path", () => {
       payload: { outcome: "sent" },
     });
     expect(res.statusCode).toBe(400);
+  });
+});
+
+describe("with the organization's Salesforce connected — the deal step over HTTP", () => {
+  it("sync asks Salesforce about Alice's contacts with the ORG token, and the confirmed deal lands on her list", async () => {
+    // The org connects Salesforce (org vault: org-bound AAD, the same key the
+    // server derives from CONNECTOR_ENCRYPTION_MASTER_KEY).
+    const master = createHash("sha256").update(serverEnv.CONNECTOR_ENCRYPTION_MASTER_KEY).digest();
+    const envelope = envelopeEncrypt(
+      { access_token: "sf-org-token", instance_url: "https://na1.example.com" },
+      master,
+      { organization_id: orgId, provider: "salesforce" },
+    );
+    await upsertConnectorAccount(
+      client.sql,
+      { organizationId: orgId },
+      {
+        id: uuidv7(),
+        organization_id: orgId,
+        provider: "salesforce",
+        external_account_id_hash: "sf-hash",
+        display_label: "Salesforce",
+        scopes: ["api", "refresh_token"],
+        status: "connected",
+        encrypted_token_ciphertext: envelope.ciphertext,
+        encrypted_data_key: envelope.encrypted_data_key,
+        token_key_version: envelope.key_version,
+      },
+    );
+
+    const res = await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().deals).toEqual({
+      ok: true,
+      provider: "salesforce",
+      asked: 2,
+      open: 1,
+      closed: 0,
+      unknown: 1,
+    });
+    // Read-only, on the org's instance, with the org's token — not Alice's Gmail token.
+    expect(crmRequests).toHaveLength(1);
+    expect(crmRequests[0]!.method).toBe("GET");
+    expect(crmRequests[0]!.url.startsWith("https://na1.example.com/services/data/")).toBe(true);
+    expect(crmRequests[0]!.headers["authorization"]).toBe("Bearer sf-org-token");
+    const soql = new URL(crmRequests[0]!.url).searchParams.get("q")!;
+    expect(soql).toContain("'bob@client.com'");
+    expect(soql).toContain("'sarah@acme.com'");
+
+    const contacts = await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) =>
+        tx`SELECT external_id, has_open_deal, open_deal_value, account_name FROM contacts ORDER BY external_id`,
+    );
+    expect(
+      contacts.map((c) => [
+        c["external_id"],
+        c["has_open_deal"],
+        c["open_deal_value"],
+        c["account_name"],
+      ]),
+    ).toEqual([
+      ["bob@client.com", true, "40000.00", "Client Co"],
+      ["sarah@acme.com", null, null, null], // not in the CRM: unknown, still listed
+    ]);
+  });
+
+  it("Bob's own sync in the same org asks about HIS contacts, not Alice's", async () => {
+    crmRequests.length = 0;
+    const res = await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(bob) });
+    // Bob has no mailbox connected, so the sync stops before the deal step —
+    // and the CRM is never asked on his behalf about anyone.
+    expect(res.statusCode).toBe(409);
+    expect(crmRequests).toHaveLength(0);
   });
 });

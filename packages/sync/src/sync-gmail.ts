@@ -1,7 +1,6 @@
 import type { Sql } from "postgres";
 import {
   syncGmailThreads,
-  type DealSource,
   type HttpTransport,
   type UserCredentialProvider,
 } from "@maman/connector-adapters";
@@ -16,6 +15,7 @@ import {
   type UserContext,
 } from "@maman/db";
 import { detectObligations, type DetectionConfig } from "@maman/obligation-engine";
+import type { DealSourceResolver } from "./deal-source.js";
 
 /**
  * THE L1 VERTICAL SLICE: mailbox → rows → detector → ranked obligations.
@@ -36,12 +36,13 @@ export type GmailSyncJobDeps = {
   transport: HttpTransport;
   now: () => Date;
   /**
-   * The organization's CRM, when one is connected. Absent → deal state stays
-   * unknown and the list still works (0009). Present → asked about THIS
-   * person's contacts only, between the mailbox write and detection, so the
-   * ranking that lands is the one the CRM informed.
+   * Finds the organization's CRM, when one is connected. Absent, or resolving
+   * to nothing → deal state stays unknown and the list still works (0009).
+   * Otherwise the CRM is asked about THIS person's contacts only, between the
+   * mailbox write and detection, so the ranking that lands is the one it
+   * informed.
    */
-  deals?: DealSource | undefined;
+  deals?: DealSourceResolver | undefined;
 };
 
 export type DealStepResult =
@@ -132,15 +133,16 @@ export async function runGmailSyncJob(
 }
 
 async function dealStep(deps: GmailSyncJobDeps, ctx: UserContext): Promise<DealStepResult> {
-  if (!deps.deals) return { ok: false, provider: null, reason: "no_crm" };
-  const provider = deps.deals.provider;
+  const source = deps.deals ? await deps.deals(ctx.organizationId) : undefined;
+  if (!source) return { ok: false, provider: null, reason: "no_crm" };
+  const provider = source.provider;
   const addresses = await listContactAddresses(deps.sql, ctx);
   if (addresses.length === 0) {
     return { ok: true, provider, asked: 0, open: 0, closed: 0, unknown: 0 };
   }
   let answer;
   try {
-    answer = await deps.deals.lookup(
+    answer = await source.lookup(
       { organization_id: ctx.organizationId, user_id: ctx.userId },
       addresses,
     );

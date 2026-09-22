@@ -74,7 +74,7 @@ function recordToAccount(r: SalesforceRecord, map: SalesforceFieldMap): SfAccoun
 }
 
 /** Escapes a value for safe embedding inside a SOQL single-quoted literal. */
-function soqlLiteral(value: string): string {
+export function soqlLiteral(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 

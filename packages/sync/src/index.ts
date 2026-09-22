@@ -5,6 +5,12 @@
  * package and not a file in either app: apps may not import apps.
  */
 export { createUserVaultCredentialProvider, type UserVaultDeps } from "./user-vault-credentials.js";
+export { createOrgVaultCredentialProvider, type OrgVaultDeps } from "./org-vault-credentials.js";
+export {
+  resolveDealSource,
+  type DealSourceResolver,
+  type ResolveDealSourceDeps,
+} from "./deal-source.js";
 export {
   runGmailSyncJob,
   type DealStepResult,

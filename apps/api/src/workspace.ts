@@ -25,7 +25,12 @@ import {
   setObligationOutcome,
   type UserContext,
 } from "@maman/db";
-import { createUserVaultCredentialProvider, runGmailSyncJob } from "@maman/sync";
+import {
+  createOrgVaultCredentialProvider,
+  createUserVaultCredentialProvider,
+  resolveDealSource,
+  runGmailSyncJob,
+} from "@maman/sync";
 import { deterministicComposer, type DraftComposer } from "@maman/voice-engine";
 import { requirePrincipal } from "./auth.js";
 import { authorize } from "./authorization.js";
@@ -61,6 +66,8 @@ export type WorkspaceRouteDeps = {
   tokenTransport?: TokenTransport;
   /** Provider API transport for sync (tests inject a scripted Gmail). */
   gmailTransport?: HttpTransport;
+  /** CRM API transport for the deal step (tests inject a scripted Salesforce). */
+  crmTransport?: HttpTransport;
   now?: () => Date;
   /** Draft composer; the deterministic one until a model earns its place. */
   composer?: DraftComposer;
@@ -74,6 +81,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
   const now = deps.now ?? (() => new Date());
   const tokenTransport = deps.tokenTransport ?? createConnectorTokenTransport();
   const gmailTransport = deps.gmailTransport ?? fetchTransport;
+  const crmTransport = deps.crmTransport ?? fetchTransport;
   const composer = deps.composer ?? deterministicComposer;
 
   const clientFor = (provider: string) =>
@@ -83,6 +91,25 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
           ...(env.GOOGLE_CLIENT_SECRET ? { client_secret: env.GOOGLE_CLIENT_SECRET } : {}),
         }
       : null;
+  const orgClientFor = (provider: string) =>
+    provider === "salesforce" && env.SALESFORCE_CLIENT_ID
+      ? {
+          client_id: env.SALESFORCE_CLIENT_ID,
+          ...(env.SALESFORCE_CLIENT_SECRET ? { client_secret: env.SALESFORCE_CLIENT_SECRET } : {}),
+        }
+      : null;
+  /** The organization's CRM, looked up per sync; the org vault, never the user's. */
+  const dealsFor = (sql: Sql) =>
+    resolveDealSource({
+      sql,
+      credentials: createOrgVaultCredentialProvider({
+        sql,
+        masterKey: master,
+        transport: tokenTransport,
+        clientCredentials: orgClientFor,
+      }),
+      transport: crmTransport,
+    });
 
   const userCtx = (p: { organization_id: string; user_id: string }): UserContext => ({
     organizationId: p.organization_id,
@@ -222,6 +249,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         }),
         transport: gmailTransport,
         now,
+        deals: dealsFor(sql),
       },
       userCtx(principal),
     );
