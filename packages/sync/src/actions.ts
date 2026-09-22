@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
-import type { SalesforceActivityWriter } from "@maman/connector-adapters";
+import type {
+  OpportunityRecord,
+  SalesforceActivityWriter,
+  SalesforceOpportunityWriter,
+} from "@maman/connector-adapters";
 import {
   appendAuditEvent,
   createAction,
@@ -21,6 +25,7 @@ import {
   type OrgPolicy,
 } from "@maman/policy-engine";
 import { activeRules, stateIntent } from "./intents.js";
+import type { OpportunityOutput } from "@maman/model-provider";
 
 /**
  * ACTIONS: the agent writing to a system of record, with the safeguards
@@ -43,6 +48,18 @@ import { activeRules, stateIntent } from "./intents.js";
  */
 
 export const LOG_ACTIVITY = "salesforce.log_activity";
+export const UPDATE_OPPORTUNITY = "salesforce.update_opportunity";
+
+/** A field change read from the thread: what the record holds, what it will hold, and the sentence that says so. */
+export type FieldChange = { from: string | null; to: string; quote: string };
+
+export type OpportunityDiff = {
+  kind: typeof UPDATE_OPPORTUNITY;
+  opportunity_id: string;
+  opportunity_name: string;
+  contact_display_name: string;
+  changes: { next_step?: FieldChange; close_date?: FieldChange };
+};
 
 export type ActivityDiff = {
   kind: typeof LOG_ACTIVITY;
@@ -81,6 +98,8 @@ export type ActionDeps = {
   sql: Sql;
   contentKey: Buffer;
   writer: SalesforceActivityWriter;
+  /** Opportunity fields. Optional so a caller with only the activity writer still works. */
+  opportunities?: SalesforceOpportunityWriter | undefined;
   orgPolicy: (organizationId: string) => Promise<OrgPolicy>;
   now: () => Date;
 };
@@ -138,6 +157,76 @@ export async function proposeActivityLog(
     // One live action per message. A stale or declined one can be proposed
     // again; the key names the attempt so the ledger's unique index holds.
     idempotency_key: `${LOG_ACTIVITY}:${input.message_external_id}:${existing ? existing.id : "first"}`,
+  });
+}
+
+/**
+ * Proposes the opportunity fields the thread states. Only fields that differ
+ * from the record, each with its sentence. Grounding happened before this
+ * (groundOpportunityUpdate); this trusts nothing else. One live proposal per
+ * (kind, latest message).
+ */
+export async function proposeOpportunityUpdate(
+  deps: ActionDeps,
+  ctx: UserContext,
+  input: {
+    thread_id: string;
+    contact_id: string;
+    contact_display_name: string;
+    message_external_id: string;
+    opportunity: OpportunityRecord;
+    read: OpportunityOutput;
+  },
+): Promise<ActionRow | { ok: false; reason: "exists" | "not_allowed" | "nothing_to_change" }> {
+  const existing = await findActionForMessage(
+    deps.sql,
+    ctx,
+    UPDATE_OPPORTUNITY,
+    input.message_external_id,
+  );
+  if (existing && existing.status !== "declined" && existing.status !== "stale") {
+    return { ok: false, reason: "exists" };
+  }
+  const policy = orgActionPolicy(await deps.orgPolicy(ctx.organizationId), UPDATE_OPPORTUNITY);
+  if (!policy.allowed) return { ok: false, reason: "not_allowed" };
+  if (input.opportunity.is_closed) return { ok: false, reason: "nothing_to_change" };
+  const changes: OpportunityDiff["changes"] = {};
+  if (input.read.next_step && input.read.next_step.value !== (input.opportunity.next_step ?? "")) {
+    changes.next_step = {
+      from: input.opportunity.next_step,
+      to: input.read.next_step.value,
+      quote: input.read.next_step.quote,
+    };
+  }
+  if (input.read.close_date && input.read.close_date.value !== input.opportunity.close_date) {
+    changes.close_date = {
+      from: input.opportunity.close_date,
+      to: input.read.close_date.value,
+      quote: input.read.close_date.quote,
+    };
+  }
+  if (Object.keys(changes).length === 0) return { ok: false, reason: "nothing_to_change" };
+  const diff: OpportunityDiff = {
+    kind: UPDATE_OPPORTUNITY,
+    opportunity_id: input.opportunity.id,
+    opportunity_name: input.opportunity.name,
+    contact_display_name: input.contact_display_name,
+    changes,
+  };
+  return createAction(deps.sql, ctx, {
+    kind: UPDATE_OPPORTUNITY,
+    thread_id: input.thread_id,
+    contact_id: input.contact_id,
+    message_external_id: input.message_external_id,
+    diff,
+    diff_sha256: diffHash(diff),
+    shape_sha256: shapeHash(UPDATE_OPPORTUNITY, { ...changes }),
+    evidence: {
+      message_external_id: input.message_external_id,
+      thread_id: input.thread_id,
+      quotes: Object.values(changes).map((c) => c.quote),
+    },
+    idempotency_key: `${UPDATE_OPPORTUNITY}:${input.message_external_id}:${existing ? existing.id : "first"}`,
   });
 }
 
@@ -204,6 +293,7 @@ export async function applyAction(
   const action = await getAction(deps.sql, ctx, id);
   if (!action) return { ok: false, action: null, reason: "not_found" };
   if (action.status !== "approved") return { ok: false, action, reason: "not_approved" };
+  if (action.kind === UPDATE_OPPORTUNITY) return applyOpportunityUpdate(deps, ctx, action);
   const diff = action.diff as ActivityDiff;
   const audit = async (
     outcome: "success" | "failure",
@@ -328,6 +418,142 @@ export async function applyAction(
   }
 }
 
+/**
+ * Applies an opportunity update. Reads the record first: a field the person
+ * changed by hand since the proposal is never overwritten; the action goes
+ * stale and shows both. Writes only the fields in the diff. Reads back and
+ * compares. Keeps the previous values so undo is a write of the same shape.
+ */
+async function applyOpportunityUpdate(
+  deps: ActionDeps,
+  ctx: UserContext,
+  action: ActionRow,
+): Promise<ApplyResult> {
+  const diff = action.diff as OpportunityDiff;
+  const writer = deps.opportunities;
+  const audit = async (
+    outcome: "success" | "failure",
+    reason: string,
+    metadata: Record<string, string | number | boolean>,
+  ) =>
+    appendAuditEvent(
+      deps.sql,
+      { organizationId: ctx.organizationId },
+      {
+        organization_id: ctx.organizationId,
+        actor_type: action.approved_by === "promotion" ? "service" : "user",
+        actor_id: ctx.userId,
+        action: `action.${action.kind}`,
+        resource_type: "action",
+        resource_id: action.id,
+        outcome,
+        reason_code: reason,
+        metadata,
+      },
+    ).catch(() => undefined);
+  if (!writer) {
+    const row = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
+      status: "failed",
+      error: "opportunity writer not configured",
+    });
+    return { ok: false, action: row ?? action, reason: "provider" };
+  }
+  try {
+    const before = await writer.readOpportunity(ctx.organizationId, diff.opportunity_id);
+    if (!before) {
+      const row = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
+        status: "failed",
+        error: "opportunity not in Salesforce",
+      });
+      await audit("failure", "opportunity_not_found", {});
+      return { ok: false, action: row ?? action, reason: "provider" };
+    }
+    // Never write over a hand edit: what we proposed FROM must still be there.
+    const moved: string[] = [];
+    if (
+      diff.changes.next_step &&
+      (before.next_step ?? null) !== (diff.changes.next_step.from ?? null)
+    ) {
+      moved.push("next_step");
+    }
+    if (
+      diff.changes.close_date &&
+      (before.close_date ?? null) !== (diff.changes.close_date.from ?? null)
+    ) {
+      moved.push("close_date");
+    }
+    if (moved.length > 0) {
+      const row = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
+        status: "stale",
+        error: `changed in Salesforce since you saw it: ${moved.join(", ")}`,
+        verification: {
+          verified: false,
+          current: { next_step: before.next_step, close_date: before.close_date },
+        },
+      });
+      return { ok: false, action: row ?? action, reason: "stale" };
+    }
+    const fields: { next_step?: string; close_date?: string } = {};
+    if (diff.changes.next_step) fields.next_step = diff.changes.next_step.to;
+    if (diff.changes.close_date) fields.close_date = diff.changes.close_date.to;
+    await writer.updateOpportunity(ctx.organizationId, diff.opportunity_id, fields);
+    const revert: { next_step?: string | null; close_date?: string | null } = {};
+    if (diff.changes.next_step) revert.next_step = diff.changes.next_step.from;
+    if (diff.changes.close_date) revert.close_date = diff.changes.close_date.from;
+    const applied = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
+      status: "applied",
+      applied_at: deps.now().toISOString(),
+      external_id: diff.opportunity_id,
+      revert: { opportunity_id: diff.opportunity_id, fields: revert },
+    });
+    // Independent read-back, field by field.
+    const after = await writer.readOpportunity(ctx.organizationId, diff.opportunity_id);
+    const mismatches: string[] = [];
+    if (!after) mismatches.push("opportunity not found on read-back");
+    else {
+      if (fields.next_step !== undefined && (after.next_step ?? "") !== fields.next_step) {
+        mismatches.push("NextStep");
+      }
+      if (fields.close_date !== undefined && after.close_date !== fields.close_date) {
+        mismatches.push("CloseDate");
+      }
+    }
+    if (mismatches.length > 0) {
+      const row = await transitionAction(deps.sql, ctx, action.id, ["applied"], {
+        status: "failed",
+        verification: { verified: false, mismatches },
+        error: `read-back disagreed: ${mismatches.join(", ")}`,
+      });
+      await audit("failure", "unverified", { mismatches: mismatches.join(",") });
+      return { ok: false, action: row ?? applied ?? action, reason: "unverified" };
+    }
+    const verified = await transitionAction(deps.sql, ctx, action.id, ["applied"], {
+      status: "verified",
+      verification: {
+        verified: true,
+        opportunity_id: diff.opportunity_id,
+        fields,
+        read_at: deps.now().toISOString(),
+      },
+      verified_at: deps.now().toISOString(),
+    });
+    await audit("success", "verified", {
+      opportunity_id: diff.opportunity_id,
+      fields: Object.keys(fields).join(","),
+      approved_by: action.approved_by ?? "user",
+    });
+    return { ok: true, action: verified ?? applied ?? action, verified: true };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    const row = await transitionAction(deps.sql, ctx, action.id, ["approved", "applied"], {
+      status: "failed",
+      error: message,
+    });
+    await audit("failure", "provider_error", { error: message.slice(0, 200) });
+    return { ok: false, action: row ?? action, reason: "provider" };
+  }
+}
+
 /** Puts it back: deletes the task and reads back that it is gone. */
 export async function revertAction(
   deps: ActionDeps,
@@ -339,9 +565,58 @@ export async function revertAction(
 > {
   const action = await getAction(deps.sql, ctx, id);
   if (!action) return { ok: false, reason: "not_found" };
-  const taskId = (action.revert as { delete_task?: string } | null)?.delete_task;
-  if (!taskId || !["verified", "applied", "failed"].includes(action.status))
+  if (!["verified", "applied", "failed"].includes(action.status)) {
     return { ok: false, reason: "not_revertible" };
+  }
+  const opp = action.revert as {
+    opportunity_id?: string;
+    fields?: { next_step?: string | null; close_date?: string | null };
+  } | null;
+  if (opp?.opportunity_id && opp.fields && deps.opportunities) {
+    // The same shape of write, with the previous values, read back the same way.
+    try {
+      await deps.opportunities.updateOpportunity(
+        ctx.organizationId,
+        opp.opportunity_id,
+        opp.fields,
+      );
+      const after = await deps.opportunities.readOpportunity(
+        ctx.organizationId,
+        opp.opportunity_id,
+      );
+      const back =
+        !!after &&
+        (opp.fields.next_step === undefined ||
+          (after.next_step ?? null) === (opp.fields.next_step ?? null)) &&
+        (opp.fields.close_date === undefined ||
+          (after.close_date ?? null) === (opp.fields.close_date ?? null));
+      if (!back) return { ok: false, reason: "provider" };
+      const row = await transitionAction(deps.sql, ctx, id, ["verified", "applied", "failed"], {
+        status: "reverted",
+        reverted_at: deps.now().toISOString(),
+      });
+      await appendAuditEvent(
+        deps.sql,
+        { organizationId: ctx.organizationId },
+        {
+          organization_id: ctx.organizationId,
+          actor_type: "user",
+          actor_id: ctx.userId,
+          action: `action.${action.kind}.revert`,
+          resource_type: "action",
+          resource_id: action.id,
+          outcome: "success",
+          reason_code: "reverted",
+          metadata: { opportunity_id: opp.opportunity_id },
+        },
+      ).catch(() => undefined);
+      return row ? { ok: true, action: row } : { ok: false, reason: "not_revertible" };
+    } catch {
+      return { ok: false, reason: "provider" };
+    }
+  }
+  const taskId = (action.revert as { delete_task?: string } | null)?.delete_task;
+  if (!taskId) return { ok: false, reason: "not_revertible" };
   try {
     await deps.writer.deleteTask(ctx.organizationId, taskId);
     const still = await deps.writer.readTask(ctx.organizationId, taskId);
@@ -401,10 +676,14 @@ export async function promoteAction(
   if (!action) return { ok: false, reason: "not_found" };
   const policy = orgActionPolicy(await deps.orgPolicy(ctx.organizationId), action.kind);
   if (!policy.allowed || !policy.unattended) return { ok: false, reason: "not_allowed" };
+  const text =
+    action.kind === UPDATE_OPPORTUNITY
+      ? "Always update the opportunity's next step and close date from my threads, without asking."
+      : "Always log the emails I send to Salesforce, without asking.";
   const view = await stateIntent(
     deps,
     ctx,
-    "Always log the emails I send to Salesforce, without asking.",
+    text,
     "stated",
     { promoted_from: actionId },
     {
@@ -424,33 +703,55 @@ export type ActionView = {
   diff_sha256: string;
   summary: string;
   detail: string;
+  /** The sentences the write rests on, when it was read from the thread. */
+  quotes: string[];
   approved_by: ActionRow["approved_by"];
   external_id: string | null;
   verified: boolean;
   error: string | null;
   created_at: string;
   can_revert: boolean;
+  /** Whether "Always" is available: the organization allows this kind unattended. */
+  can_promote: boolean;
 };
 
 export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promise<ActionView[]> {
-  const rows = await listActions(deps.sql, ctx);
+  const [rows, policy] = await Promise.all([
+    listActions(deps.sql, ctx),
+    deps.orgPolicy(ctx.organizationId),
+  ]);
   return rows.map((r) => {
-    const d = r.diff as ActivityDiff;
-    return {
+    const base = {
       id: r.id,
       kind: r.kind,
       status: r.status,
       diff_sha256: r.diff_sha256,
-      summary: `Log to Salesforce: ${d.subject}`,
-      detail: `${d.description} Against ${d.contact_display_name}${d.what_id ? " and their open opportunity" : ""}.`,
       approved_by: r.approved_by,
       external_id: r.external_id,
       verified: r.status === "verified",
       error: r.error,
       created_at: r.created_at,
-      can_revert:
-        ["verified", "applied", "failed"].includes(r.status) &&
-        !!(r.revert as { delete_task?: string } | null)?.delete_task,
+      can_revert: ["verified", "applied", "failed"].includes(r.status) && r.revert !== null,
+      can_promote: orgActionPolicy(policy, r.kind).unattended,
+    };
+    if (r.kind === UPDATE_OPPORTUNITY) {
+      const d = r.diff as OpportunityDiff;
+      const parts: string[] = [];
+      if (d.changes.next_step) parts.push(`next step "${d.changes.next_step.to}"`);
+      if (d.changes.close_date) parts.push(`close date ${d.changes.close_date.to}`);
+      return {
+        ...base,
+        summary: `Update ${d.opportunity_name}: ${parts.join(", ")}`,
+        detail: `From the thread with ${d.contact_display_name}.`,
+        quotes: Object.values(d.changes).map((c) => c.quote),
+      };
+    }
+    const d = r.diff as ActivityDiff;
+    return {
+      ...base,
+      summary: `Log to Salesforce: ${d.subject}`,
+      detail: `${d.description} Against ${d.contact_display_name}${d.what_id ? " and their open opportunity" : ""}.`,
+      quotes: [],
     };
   });
 }

@@ -38,6 +38,12 @@ export const eventSource = z.enum([
    * below a confidence floor. See `teach-mode.ts`.
    */
   "teach_mode",
+  /**
+   * What the person did inside this product: approved a write, set an item
+   * aside, told the agent something. Their clicks are part of their routine
+   * too, and discovery needs them beside the connector events.
+   */
+  "product",
 ]);
 export type EventSource = z.infer<typeof eventSource>;
 

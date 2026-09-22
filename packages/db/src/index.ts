@@ -87,4 +87,10 @@ export {
   type ContactThreadRow,
   type DealApplyResult,
   type DealSignalRow,
+  loadEventFacts,
+  recordWorkflowEvents,
+  listWorkflowEvents,
+  latestWorkflowEventWrite,
+  countWorkflowEvents,
+  type EventFacts,
 } from "./workspace.js";

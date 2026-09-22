@@ -36,6 +36,16 @@ export {
   type GroundingResult,
   type GroundingSources,
 } from "./draft.js";
+export {
+  groundOpportunityUpdate,
+  opportunityInputSchema,
+  opportunityOutputSchema,
+  readDate,
+  readOpportunityDeterministically,
+  type OpportunityGrounding,
+  type OpportunityInput,
+  type OpportunityOutput,
+} from "./opportunity.js";
 export { DemoModelProvider } from "./demo.js";
 export { AnthropicModelProvider, type AnthropicProviderConfig } from "./anthropic.js";
 export {

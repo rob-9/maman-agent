@@ -7,6 +7,7 @@ import {
   dismissAction,
   draftAction,
   forgetIntentAction,
+  proposeCrmUpdateAction,
   proposeLogAction,
   revertActionAction,
   snoozeAction,
@@ -145,6 +146,13 @@ export default async function InboxPage() {
                     </button>
                   </form>
                 ) : null}
+                {o.reason.has_open_deal === true ? (
+                  <form action={proposeCrmUpdateAction.bind(null, o.id)}>
+                    <button className="button secondary" type="submit">
+                      Update Salesforce
+                    </button>
+                  </form>
+                ) : null}
                 <form action={snoozeAction.bind(null, o.id)}>
                   <button className="button secondary" type="submit">
                     Snooze 3 days
@@ -189,6 +197,11 @@ export default async function InboxPage() {
                 <div className="proposal-main">
                   <span className="name">{a.summary}</span>
                   <span className="fine">{a.detail}</span>
+                  {a.quotes.map((q) => (
+                    <span key={q} className="quote">
+                      &ldquo;{q}&rdquo;
+                    </span>
+                  ))}
                 </div>
                 <div className="proposal-actions">
                   <form action={approveActionAction.bind(null, a.id, a.diff_sha256)}>
@@ -196,11 +209,13 @@ export default async function InboxPage() {
                       Approve
                     </button>
                   </form>
-                  <form action={alwaysActionAction.bind(null, a.id)}>
-                    <button className="button secondary" type="submit">
-                      Always
-                    </button>
-                  </form>
+                  {a.can_promote ? (
+                    <form action={alwaysActionAction.bind(null, a.id)}>
+                      <button className="button secondary" type="submit">
+                        Always
+                      </button>
+                    </form>
+                  ) : null}
                   <form action={declineActionAction.bind(null, a.id)}>
                     <button className="button quiet" type="submit">
                       Not now

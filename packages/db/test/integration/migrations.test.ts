@@ -52,6 +52,7 @@ describe("migration lifecycle on an empty database", () => {
       "roi_measurements",
       "audit_events",
       "audit_chain_heads",
+      "workflow_events",
     ]) {
       expect(names).toContain(expected);
     }
@@ -100,6 +101,7 @@ describe("migration lifecycle on an empty database", () => {
       "roi_measurements",
       "audit_events",
       "audit_chain_heads",
+      "workflow_events",
     ];
     for (const table of tenantTables) {
       expect(rls.get(table), `RLS missing on ${table}`).toBe(true);

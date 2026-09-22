@@ -518,6 +518,19 @@ export const actions = pgTable("actions", {
   updated_at: utc("updated_at").notNull().defaultNow(),
 });
 
+/** The event stream: what the person did, derived from every source. See migration 0017. */
+export const workflow_events = pgTable("workflow_events", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  occurred_at: utc("occurred_at").notNull(),
+  source: text("source").notNull(),
+  event_type: text("event_type").notNull(),
+  dedupe_key: text("dedupe_key").notNull(),
+  event: jsonb("event").notNull(),
+  created_at: utc("created_at").notNull().defaultNow(),
+});
+
 /** The intent store. See migration 0014. */
 export const intents = pgTable("intents", {
   id: uuid("id").primaryKey(),

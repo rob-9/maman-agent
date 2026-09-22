@@ -29,6 +29,11 @@ import {
   listIntents,
   retireIntent,
   listSkippedObligations,
+  loadEventFacts,
+  recordWorkflowEvents,
+  listWorkflowEvents,
+  latestWorkflowEventWrite,
+  countWorkflowEvents,
   type SyncedThread,
 } from "../../src/workspace.js";
 import { startTestDb, type TestDb } from "./setup.js";
@@ -1068,5 +1073,145 @@ describe("a draft attached to its obligation", () => {
       (o) => o.thread_id === t.thread_id,
     )!;
     expect(after.draft).toMatchObject({ gmail_draft_id: "d-old" });
+  });
+});
+
+describe("the event stream", () => {
+  const ev = (over: Record<string, unknown> = {}) => ({
+    schema_version: 1 as const,
+    event_id: uuidv7(),
+    device_id: "1b7f4a2e-9c3d-4e5f-8a6b-7c8d9e0f1a2b",
+    user_id: userId,
+    organization_id: orgId,
+    occurred_at: "2026-09-12T09:00:00.000Z",
+    monotonic_ms: 1,
+    source: "google" as const,
+    app: { display_name: "Gmail" },
+    event_type: "record_updated" as const,
+    target: { role: "sender", semantic_type: "sent_reply" },
+    context: { object_type: "email_thread", record_id_hash: "ab".repeat(16) },
+    sensitivity: "internal" as const,
+    redaction: { applied: false, reasons: [] },
+    ...over,
+  });
+
+  it("writes an event once per fact: a second write of the same key changes nothing", async () => {
+    const before = await countWorkflowEvents(db.client.sql, ctx);
+    const first = await recordWorkflowEvents(db.client.sql, ctx, [
+      { event: ev(), dedupe_key: "message:t:1" },
+    ]);
+    expect(first).toEqual({ written: 1, refused: null });
+    const again = await recordWorkflowEvents(db.client.sql, ctx, [
+      { event: ev(), dedupe_key: "message:t:1" },
+    ]);
+    expect(again).toEqual({ written: 0, refused: null });
+    expect(await countWorkflowEvents(db.client.sql, ctx)).toBe(before + 1);
+    expect(await latestWorkflowEventWrite(db.client.sql, ctx)).toBeInstanceOf(Date);
+  });
+
+  it("refuses the whole batch when one event breaks the contract, carries a forbidden field, or names another person", async () => {
+    const before = await countWorkflowEvents(db.client.sql, ctx);
+    const bad = ev({ context: { object_type: "email_thread", body: "hello" } });
+    const r1 = await recordWorkflowEvents(db.client.sql, ctx, [
+      { event: ev(), dedupe_key: "message:t:2" },
+      { event: bad as never, dedupe_key: "message:t:3" },
+    ]);
+    expect(r1.written).toBe(0);
+    expect(r1.refused).toMatch(/contract|forbidden/);
+    const r2 = await recordWorkflowEvents(db.client.sql, ctx, [
+      { event: ev({ user_id: uuidv7() }), dedupe_key: "message:t:4" },
+    ]);
+    expect(r2).toEqual({ written: 0, refused: "event names another person" });
+    // Forbidden by name even where the contract would let a string through.
+    const sneaky = { ...ev(), app: { display_name: "Gmail", text: "x" } };
+    const r3 = await recordWorkflowEvents(db.client.sql, ctx, [
+      { event: sneaky as never, dedupe_key: "message:t:5" },
+    ]);
+    expect(r3.written).toBe(0);
+    expect(await countWorkflowEvents(db.client.sql, ctx)).toBe(before);
+  });
+
+  it("reads facts with the thread position and the previous direction, so a reply is told from a chase", async () => {
+    await upsertSyncedThreads(db.client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-events",
+          message_count: 3,
+          last_message_at: "2026-09-12T09:00:00.000Z",
+          messages: [
+            {
+              external_id: "e1",
+              from_address: "me@co.example",
+              direction: "outbound",
+              sent_at: "2026-09-10T09:00:00.000Z",
+              body_ciphertext: new Uint8Array([1]),
+              body_chars: 1,
+            },
+            {
+              external_id: "e2",
+              from_address: "bob@client.com",
+              direction: "inbound",
+              sent_at: "2026-09-11T09:00:00.000Z",
+              body_ciphertext: new Uint8Array([1]),
+              body_chars: 1,
+            },
+            {
+              external_id: "e3",
+              from_address: "me@co.example",
+              direction: "outbound",
+              sent_at: "2026-09-12T09:00:00.000Z",
+              body_ciphertext: new Uint8Array([1]),
+              body_chars: 1,
+            },
+          ],
+        }),
+      ],
+    });
+    const facts = await loadEventFacts(db.client.sql, ctx, {
+      since: null,
+      window_start: new Date("2026-09-01T00:00:00.000Z"),
+    });
+    const mine = facts.messages.filter((m) => m.thread_external_id === "gm-events");
+    expect(mine.map((m) => [m.message_external_id, m.position, m.previous_direction])).toEqual([
+      ["e1", 1, null],
+      ["e2", 2, "outbound"],
+      ["e3", 3, "inbound"],
+    ]);
+    expect(mine[0]!.contact_address).toBe("bob@client.com");
+    // Nothing in a message fact but ids, direction and time.
+    expect(Object.keys(mine[0]!).sort()).toEqual([
+      "contact_address",
+      "direction",
+      "message_external_id",
+      "position",
+      "previous_direction",
+      "sent_at",
+      "thread_external_id",
+    ]);
+  });
+
+  it("another user in the same org reads none of it, and cannot write into it", async () => {
+    const other = uuidv7();
+    await globalCreateUser(db.client.sql, {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "ev-other@co.example",
+      display_name: "Other",
+    });
+    await addMembership(
+      db.client.sql,
+      { organizationId: orgId },
+      { user_id: other, role: "member" },
+    );
+    const theirs = { organizationId: orgId, userId: other };
+    expect(await listWorkflowEvents(db.client.sql, theirs)).toEqual([]);
+    expect(await countWorkflowEvents(db.client.sql, theirs)).toBe(0);
+    // An event for Alice, written under the colleague's context, is refused before SQL.
+    const r = await recordWorkflowEvents(db.client.sql, theirs, [
+      { event: ev(), dedupe_key: "message:t:9" },
+    ]);
+    expect(r).toEqual({ written: 0, refused: "event names another person" });
+    expect((await listWorkflowEvents(db.client.sql, ctx)).length).toBeGreaterThan(0);
   });
 });

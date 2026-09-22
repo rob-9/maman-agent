@@ -171,6 +171,23 @@ const crmTransport = async (req: HttpRequest): Promise<HttpResponse> => {
   if (q.includes("FROM OpportunityContactRole WHERE ContactId")) {
     return { status: 200, headers: {}, body: { records: [{ OpportunityId: "006DEAL" }] } };
   }
+  if (url.pathname.endsWith("/sobjects/Opportunity/006DEAL") && req.method === "GET") {
+    return {
+      status: 200,
+      headers: {},
+      body: {
+        Id: "006DEAL",
+        Name: "Client Co renewal",
+        StageName: "Proposal",
+        NextStep: null,
+        CloseDate: "2026-12-31",
+        IsClosed: false,
+      },
+    };
+  }
+  if (url.pathname.endsWith("/sobjects/Opportunity/006DEAL") && req.method === "PATCH") {
+    return { status: 204, headers: {}, body: "" };
+  }
   if (q.includes("Description LIKE")) {
     const m = /'%(\[maman:[^%]+\])%'/.exec(q)?.[1] ?? "";
     const hit = [...sfTasks.values()].find((t) => String(t["Description"]).includes(m));
@@ -956,5 +973,94 @@ describe("the agent acts over HTTP: logging to Salesforce", () => {
       is_rule: true,
       text: "Always log the emails I send to Salesforce, without asking.",
     });
+  });
+});
+
+describe("the agent acts over HTTP: what the thread says about the deal", () => {
+  it("'Update Salesforce' on a card proposes the fields the thread states, with the sentences, for approval", async () => {
+    await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`UPDATE obligations SET outcome = 'pending', snoozed_until = NULL`,
+    );
+    await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`UPDATE contacts SET has_open_deal = true WHERE external_id = 'bob@client.com'`,
+    );
+    // Bob's thread now says what happens next.
+    MAILBOX["waiting"] = gmailThread(
+      "waiting",
+      "bob@client.com",
+      "alice@co.example",
+      ago(5),
+      "Proposal",
+      "Next step: send the signed order form. Let's close by end of quarter.",
+    );
+    await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: as(alice),
+    });
+    const proposal = (list.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["subject"] === "Proposal",
+    )!;
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${proposal["id"]}/update-crm`,
+      headers: as(alice),
+    });
+    expect(res.statusCode).toBe(200);
+    const actions = (
+      await app.inject({ method: "GET", url: "/v1/me/actions", headers: as(alice) })
+    ).json().actions as Array<Record<string, unknown>>;
+    const update = actions.find(
+      (a) => a["kind"] === "salesforce.update_opportunity" && a["status"] === "proposed",
+    )!;
+    expect(update).toMatchObject({ can_promote: false });
+    expect(String(update["summary"])).toContain('next step "send the signed order form"');
+    expect(update["quotes"]).toEqual([
+      "Next step: send the signed order form.",
+      "Let's close by end of quarter.",
+    ]);
+  });
+});
+
+describe("the event stream over HTTP", () => {
+  it("a sync derives the person's events; they read their own and a colleague reads none", async () => {
+    const sync = await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json().events).toMatchObject({ refused: null });
+    const mine = await app.inject({
+      method: "GET",
+      url: "/v1/me/events?limit=100",
+      headers: as(alice),
+    });
+    expect(mine.statusCode).toBe(200);
+    const events = mine.json().events as Array<Record<string, unknown>>;
+    expect(events.length).toBeGreaterThan(0);
+    for (const e of events) {
+      expect(e["user_id"]).toBe(alice);
+      expect(JSON.stringify(e)).not.toContain("@");
+    }
+    const theirs = await app.inject({ method: "GET", url: "/v1/me/events", headers: as(bob) });
+    expect(theirs.json().events).toEqual([]);
+  });
+
+  it("with the stream switched off a sync derives nothing", async () => {
+    const off = buildServer({
+      env: { ...serverEnv, EVENT_STREAM: "off" },
+      sql: client.sql,
+      connectorTransport: tokenTransport,
+      gmailTransport,
+      crmTransport,
+      now: () => NOW,
+    });
+    await off.ready();
+    const sync = await off.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json().events).toBeNull();
+    await off.close();
   });
 });

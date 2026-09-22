@@ -115,3 +115,10 @@ export async function alwaysActionAction(id: string): Promise<void> {
   revalidatePath("/");
   if (!res.ok) throw new Error(`could not set that up (${res.detail ?? res.status})`);
 }
+
+/** "Update Salesforce" on a card: what the thread says about the deal, proposed with the sentence. */
+export async function proposeCrmUpdateAction(obligationId: string): Promise<void> {
+  const res = await me.proposeCrmUpdate(obligationId);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not read the thread (${res.detail ?? res.status})`);
+}

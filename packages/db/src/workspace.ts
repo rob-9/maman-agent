@@ -1,7 +1,12 @@
 import { and, desc, eq, gte, inArray, isNull, sql as rawSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import type { Sql, TransactionSql } from "postgres";
-import { uuidv7 } from "@maman/contracts";
+import {
+  containsForbiddenEventField,
+  uuidv7,
+  workflowEventSchema,
+  type WorkflowEvent,
+} from "@maman/contracts";
 import * as schema from "./schema.js";
 import { withUser, type UserContext } from "./tenant.js";
 
@@ -1733,5 +1738,284 @@ export async function getObligationForDraft(
       },
       assessment: fresh ? (row.assessment as ThreadAssessment) : null,
     };
+  });
+}
+
+// ---- the event stream: what the person did, derived from every source ----
+
+/**
+ * The facts the sweep derives events from. Ids and times only; the bodies
+ * stay where they are. `since` narrows to rows written or changed after a
+ * point, so a sweep re-derives only what moved; absent, it is a backfill
+ * over the window.
+ */
+export type EventFacts = {
+  messages: Array<{
+    message_external_id: string;
+    thread_external_id: string;
+    direction: "inbound" | "outbound";
+    sent_at: string;
+    /** Position in the thread, 1-based, by time. */
+    position: number;
+    /** Direction of the message before it, when there is one. */
+    previous_direction: "inbound" | "outbound" | null;
+    contact_address: string;
+  }>;
+  meetings: Array<{
+    external_id: string;
+    starts_at: string;
+    ends_at: string;
+    status: "confirmed" | "tentative" | "cancelled";
+    self_response: "accepted" | "tentative" | "declined" | "needsAction";
+    attendee_count: number;
+  }>;
+  actions: Array<{
+    id: string;
+    kind: string;
+    status: string;
+    approved_by: "user" | "promotion" | null;
+    approved_at: string | null;
+    verified_at: string | null;
+    reverted_at: string | null;
+    field_names: string[];
+  }>;
+  decisions: Array<{
+    obligation_id: string;
+    kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
+    outcome: "drafted" | "snoozed" | "dismissed" | "resolved";
+    decided_at: string;
+  }>;
+  intents: Array<{
+    id: string;
+    source: "stated" | "observed" | "inferred";
+    scope_kind: "global" | "contact" | "account" | "situation";
+    created_at: string;
+  }>;
+};
+
+export async function loadEventFacts(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { since: Date | null; window_start: Date },
+): Promise<EventFacts> {
+  return withUser(sql, ctx, async (tx) => {
+    const since = opts.since ? opts.since.toISOString() : null;
+    const from = opts.window_start.toISOString();
+    const messages = await tx<
+      Array<{
+        message_external_id: string;
+        thread_external_id: string;
+        direction: "inbound" | "outbound";
+        sent_at: Date;
+        position: number;
+        previous_direction: "inbound" | "outbound" | null;
+        contact_address: string;
+      }>
+    >`
+      SELECT m.external_id AS message_external_id,
+             t.external_id AS thread_external_id,
+             m.direction,
+             m.sent_at,
+             (ROW_NUMBER() OVER (PARTITION BY m.thread_id ORDER BY m.sent_at, m.external_id))::int AS position,
+             LAG(m.direction) OVER (PARTITION BY m.thread_id ORDER BY m.sent_at, m.external_id) AS previous_direction,
+             c.external_id AS contact_address
+      FROM messages m
+      JOIN threads t ON t.id = m.thread_id
+      JOIN contacts c ON c.id = t.contact_id
+      WHERE m.sent_at >= ${from}
+      ORDER BY m.sent_at, m.external_id
+    `;
+    const meetings = await tx<
+      Array<{
+        external_id: string;
+        starts_at: Date;
+        ends_at: Date;
+        status: "confirmed" | "tentative" | "cancelled";
+        self_response: "accepted" | "tentative" | "declined" | "needsAction";
+        attendee_count: number;
+      }>
+    >`
+      SELECT external_id, starts_at, ends_at, status, self_response,
+             jsonb_array_length(attendees)::int AS attendee_count
+      FROM meetings
+      WHERE ends_at >= ${from}
+        AND (${since}::timestamptz IS NULL OR updated_at >= ${since}::timestamptz)
+      ORDER BY starts_at, external_id
+    `;
+    const actions = await tx<
+      Array<{
+        id: string;
+        kind: string;
+        status: string;
+        approved_by: "user" | "promotion" | null;
+        approved_at: Date | null;
+        verified_at: Date | null;
+        reverted_at: Date | null;
+        diff: unknown;
+      }>
+    >`
+      SELECT id, kind, status, approved_by, approved_at, verified_at, reverted_at, diff
+      FROM actions
+      WHERE created_at >= ${from}
+        AND (${since}::timestamptz IS NULL OR updated_at >= ${since}::timestamptz)
+      ORDER BY created_at, id
+    `;
+    const decisions = await tx<
+      Array<{
+        obligation_id: string;
+        kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
+        outcome: "drafted" | "snoozed" | "dismissed" | "resolved";
+        decided_at: Date;
+      }>
+    >`
+      SELECT id AS obligation_id, kind, outcome, updated_at AS decided_at
+      FROM obligations
+      WHERE outcome IN ('drafted', 'snoozed', 'dismissed', 'resolved')
+        AND updated_at >= ${from}
+        AND (${since}::timestamptz IS NULL OR updated_at >= ${since}::timestamptz)
+      ORDER BY updated_at, id
+    `;
+    const intents = await tx<
+      Array<{
+        id: string;
+        source: "stated" | "observed" | "inferred";
+        scope_kind: "global" | "contact" | "account" | "situation";
+        created_at: Date;
+      }>
+    >`
+      SELECT id, source, scope_kind, created_at
+      FROM intents
+      WHERE created_at >= ${from}
+        AND (${since}::timestamptz IS NULL OR created_at >= ${since}::timestamptz)
+      ORDER BY created_at, id
+    `;
+    // Messages are re-read whole when anything moved: position and the
+    // previous direction depend on the thread, not the row.
+    const iso = (d: Date) => new Date(d).toISOString();
+    return {
+      messages: messages.map((m) => ({
+        message_external_id: m.message_external_id,
+        thread_external_id: m.thread_external_id,
+        direction: m.direction,
+        sent_at: iso(m.sent_at),
+        position: Number(m.position),
+        previous_direction: m.previous_direction,
+        contact_address: m.contact_address,
+      })),
+      meetings: meetings.map((m) => ({
+        external_id: m.external_id,
+        starts_at: iso(m.starts_at),
+        ends_at: iso(m.ends_at),
+        status: m.status,
+        self_response: m.self_response,
+        attendee_count: Number(m.attendee_count),
+      })),
+      actions: actions.map((a) => ({
+        id: a.id,
+        kind: a.kind,
+        status: a.status,
+        approved_by: a.approved_by,
+        approved_at: a.approved_at ? iso(a.approved_at) : null,
+        verified_at: a.verified_at ? iso(a.verified_at) : null,
+        reverted_at: a.reverted_at ? iso(a.reverted_at) : null,
+        field_names: fieldNamesOf(a.diff),
+      })),
+      decisions: decisions.map((d) => ({
+        obligation_id: d.obligation_id,
+        kind: d.kind,
+        outcome: d.outcome,
+        decided_at: iso(d.decided_at),
+      })),
+      intents: intents.map((i) => ({
+        id: i.id,
+        source: i.source,
+        scope_kind: i.scope_kind,
+        created_at: iso(i.created_at),
+      })),
+    };
+  });
+}
+
+/** The field names a write touched, from its diff. Names only, never values. */
+function fieldNamesOf(diff: unknown): string[] {
+  if (!diff || typeof diff !== "object") return [];
+  const d = diff as { changes?: Record<string, unknown>; fields?: Record<string, unknown> };
+  if (d.changes && typeof d.changes === "object") return Object.keys(d.changes).sort();
+  if (d.fields && typeof d.fields === "object") return Object.keys(d.fields).sort();
+  return [];
+}
+
+/**
+ * Writes derived events, exactly once per fact. Every event is checked
+ * against the contract and scanned for forbidden field names first; one bad
+ * event refuses the whole batch, so nothing partial lands.
+ */
+export async function recordWorkflowEvents(
+  sql: Sql,
+  ctx: UserContext,
+  events: ReadonlyArray<{ event: WorkflowEvent; dedupe_key: string }>,
+): Promise<{ written: number; refused: string | null }> {
+  for (const { event } of events) {
+    const parsed = workflowEventSchema.safeParse(event);
+    if (!parsed.success) {
+      return { written: 0, refused: `contract: ${parsed.error.issues[0]?.path.join(".")}` };
+    }
+    const forbidden = containsForbiddenEventField(event);
+    if (forbidden) return { written: 0, refused: `forbidden field: ${forbidden}` };
+    if (event.organization_id !== ctx.organizationId || event.user_id !== ctx.userId) {
+      return { written: 0, refused: "event names another person" };
+    }
+  }
+  if (events.length === 0) return { written: 0, refused: null };
+  return withUser(sql, ctx, async (tx) => {
+    let written = 0;
+    for (const { event, dedupe_key } of events) {
+      const rows = await tx`
+        INSERT INTO workflow_events
+          (id, organization_id, owner_user_id, occurred_at, source, event_type, dedupe_key, event)
+        VALUES (${event.event_id}, ${ctx.organizationId}, ${ctx.userId}, ${event.occurred_at},
+                ${event.source}, ${event.event_type}, ${dedupe_key}, ${JSON.stringify(event)}::jsonb)
+        ON CONFLICT (owner_user_id, dedupe_key) DO NOTHING
+        RETURNING id
+      `;
+      written += rows.length;
+    }
+    return { written, refused: null };
+  });
+}
+
+/** The stream, oldest first, as the contract shapes it. */
+export async function listWorkflowEvents(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { since?: Date | undefined; limit?: number | undefined } = {},
+): Promise<WorkflowEvent[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<Array<{ event: unknown }>>`
+      SELECT event FROM workflow_events
+      WHERE (${opts.since ? opts.since.toISOString() : null}::timestamptz IS NULL
+             OR occurred_at >= ${opts.since ? opts.since.toISOString() : null}::timestamptz)
+      ORDER BY occurred_at, id
+      LIMIT ${opts.limit ?? 5000}
+    `;
+    return rows.map((r) => workflowEventSchema.parse(r.event));
+  });
+}
+
+/** When the stream was last written to, so a sweep derives only what moved. */
+export async function latestWorkflowEventWrite(sql: Sql, ctx: UserContext): Promise<Date | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<Array<{ at: Date | null }>>`
+      SELECT max(created_at) AS at FROM workflow_events
+    `;
+    const at = rows[0]?.at ?? null;
+    return at ? new Date(at) : null;
+  });
+}
+
+export async function countWorkflowEvents(sql: Sql, ctx: UserContext): Promise<number> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<Array<{ n: number }>>`SELECT count(*)::int AS n FROM workflow_events`;
+    return Number(rows[0]?.n ?? 0);
   });
 }

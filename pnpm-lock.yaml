@@ -909,6 +909,9 @@ importers:
       '@maman/connector-auth':
         specifier: workspace:*
         version: link:../connector-auth
+      '@maman/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@maman/db':
         specifier: workspace:*
         version: link:../db
@@ -931,9 +934,9 @@ importers:
         specifier: ^3.4.5
         version: 3.4.9
     devDependencies:
-      '@maman/contracts':
+      '@maman/pattern-engine':
         specifier: workspace:*
-        version: link:../contracts
+        version: link:../pattern-engine
       '@maman/tsconfig':
         specifier: workspace:*
         version: link:../tsconfig

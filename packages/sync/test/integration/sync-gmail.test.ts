@@ -31,7 +31,11 @@ import { meetingContext } from "../../src/meetings.js";
 import { intentsFor, listIntentViews, skippedWithReasons, stateIntent } from "../../src/intents.js";
 import { DeterministicModelProvider } from "@maman/model-provider";
 import { deterministicContextComposer } from "@maman/voice-engine";
-import { salesforceActivityWriter, type CredentialProvider } from "@maman/connector-adapters";
+import {
+  salesforceActivityWriter,
+  salesforceOpportunityWriter,
+  type CredentialProvider,
+} from "@maman/connector-adapters";
 import { DEFAULT_ORG_POLICY, orgPolicySchema } from "@maman/policy-engine";
 import { recordDraft as recordDraftRow, listActions, verifyAuditChain } from "@maman/db";
 import {
@@ -44,6 +48,11 @@ import {
   revertAction,
   sentFromMatchedDrafts,
 } from "../../src/actions.js";
+import { runOpportunityPass } from "../../src/opportunity-pass.js";
+import { runEventStep } from "../../src/events.js";
+import { runPatternEngine, toPatternFeature } from "@maman/pattern-engine";
+import { patternFeatureEventSchema } from "@maman/contracts";
+import { countWorkflowEvents, listWorkflowEvents, setObligationOutcome } from "@maman/db";
 import { recordDraft, draftOutcomes } from "@maman/db";
 
 /**
@@ -412,6 +421,7 @@ describe("the agent pass", () => {
     nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
     draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
     composeDraft: async () => ({ ok: false, error: "unavailable" }),
+    readOpportunity: async () => ({ ok: false, error: "unavailable" }),
     async assessObligation(input) {
       seen.push(input);
       if (mode === "down") return { ok: false, error: "unavailable" };
@@ -757,6 +767,7 @@ describe("the calendar step", () => {
       nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
       draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
       composeDraft: async () => ({ ok: false, error: "unavailable" }),
+      readOpportunity: async () => ({ ok: false, error: "unavailable" }),
       async assessObligation(input) {
         seen.push(input);
         return {
@@ -881,6 +892,7 @@ describe("the intent store in the sweep", () => {
       nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
       draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
       composeDraft: async () => ({ ok: false, error: "unavailable" }),
+      readOpportunity: async () => ({ ok: false, error: "unavailable" }),
       async assessObligation(input) {
         seen.push(input);
         return {
@@ -905,6 +917,7 @@ describe("drafts written before being asked", () => {
     nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
     draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
     composeDraft: async () => ({ ok: false, error: "unavailable" }),
+    readOpportunity: async () => ({ ok: false, error: "unavailable" }),
     async assessObligation(input) {
       // Sarah's question is owed; nothing else is.
       const owed = input.subject === "Enterprise pricing";
@@ -1330,5 +1343,330 @@ describe("the agent acts: logging a sent email to Salesforce", () => {
     // The reply carried "Re: Proposal", and the thread's subject follows its last message.
     expect(matched[0]).toMatchObject({ contact_email: "bob@client.com", subject: "Re: Proposal" });
     expect(await listActions(client.sql, { organizationId: orgId, userId: bob })).toEqual([]);
+  });
+});
+
+describe("the agent acts: what the thread says about the deal", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  /** Bob's open opportunity, in a scripted Salesforce that also finds contacts and roles. */
+  const opp = {
+    Id: "006DEAL",
+    Name: "Client Co renewal",
+    StageName: "Proposal",
+    NextStep: null as string | null,
+    CloseDate: "2026-12-31",
+    IsClosed: false,
+  };
+  const sfCalls: HttpRequest[] = [];
+  /** A Salesforce that says 204 and changes nothing (a validation rule, a flow that resets the field). */
+  let sfIgnoresWrites = false;
+  const sfTransport = async (req: HttpRequest): Promise<HttpResponse> => {
+    sfCalls.push(req);
+    const url = new URL(req.url);
+    const q = url.searchParams.get("q") ?? "";
+    if (q.includes("FROM Contact")) {
+      return q.includes("bob@client.com") || q.includes("sarah@acme.com")
+        ? {
+            status: 200,
+            headers: {},
+            body: {
+              records: [{ Id: q.includes("bob") ? "003BOB" : "003SARAH", AccountId: "001X" }],
+            },
+          }
+        : { status: 200, headers: {}, body: { records: [] } };
+    }
+    if (q.includes("FROM OpportunityContactRole"))
+      return { status: 200, headers: {}, body: { records: [{ OpportunityId: "006DEAL" }] } };
+    if (url.pathname.endsWith("/sobjects/Opportunity/006DEAL") && req.method === "GET")
+      return { status: 200, headers: {}, body: opp };
+    if (url.pathname.endsWith("/sobjects/Opportunity/006DEAL") && req.method === "PATCH") {
+      if (sfIgnoresWrites) return { status: 204, headers: {}, body: "" };
+      const body = JSON.parse(req.body!) as Record<string, string | null>;
+      if ("NextStep" in body) opp.NextStep = body["NextStep"] ?? null;
+      if ("CloseDate" in body) opp.CloseDate = body["CloseDate"] ?? opp.CloseDate;
+      return { status: 204, headers: {}, body: "" };
+    }
+    return { status: 404, headers: {}, body: {} };
+  };
+  const orgCreds: CredentialProvider = {
+    load: async () => ({ access_token: "sf-tok", instance_url: "https://na1.example.com" }),
+    refresh: async () => ({ access_token: "sf-tok", instance_url: "https://na1.example.com" }),
+  };
+  let policy = DEFAULT_ORG_POLICY;
+  const odeps = () => ({
+    sql: client.sql,
+    contentKey: master,
+    writer: salesforceActivityWriter({ credentials: orgCreds, transport: sfTransport }),
+    opportunities: salesforceOpportunityWriter({ credentials: orgCreds, transport: sfTransport }),
+    orgPolicy: async () => policy,
+    now: () => NOW,
+    provider: new DeterministicModelProvider(),
+  });
+
+  it("reads the deal's next step and close date from the thread, proposes only what differs, with the sentences", async () => {
+    // Sarah's thread now says what happens next and when it closes; Sarah is on the open deal.
+    MAILBOX["owed"] = gmailThread(
+      "owed",
+      "Sarah Chen <sarah@acme.com>",
+      "alice@co.example",
+      ago(5),
+      "Enterprise pricing",
+      "Thanks Alex. Next step: send over the MSA for legal. We'd like to sign by end of quarter.",
+    );
+    CALENDAR = { items: [], nextSyncToken: "cal-tok-op" };
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE contacts SET has_open_deal = true, open_deal_value = 40000 WHERE external_id = 'sarah@acme.com'`,
+    );
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    await runGmailSyncJob(
+      { ...deps(), agent: { provider: new DeterministicModelProvider() } },
+      ctx,
+    );
+    const r = await runOpportunityPass(odeps(), ctx);
+    expect(r).toMatchObject({ proposed: 1, ungrounded: 0, auto_applied: 0, failed: 0 });
+    const views = await listActionViews(odeps(), ctx);
+    const proposal = views.find(
+      (v) => v.kind === "salesforce.update_opportunity" && v.status === "proposed",
+    )!;
+    expect(proposal.summary).toBe(
+      'Update Client Co renewal: next step "send over the MSA for legal", close date 2026-09-30',
+    );
+    expect(proposal.quotes).toEqual([
+      "Next step: send over the MSA for legal.",
+      "We'd like to sign by end of quarter.",
+    ]);
+    // Medium risk: the organization has not allowed it unattended, so no "Always".
+    expect(proposal.can_promote).toBe(false);
+    expect(await promoteAction(odeps(), ctx, proposal.id)).toEqual({
+      ok: false,
+      reason: "not_allowed",
+    });
+    // The same thread state is not proposed twice.
+    expect(await runOpportunityPass(odeps(), ctx)).toMatchObject({ proposed: 0 });
+  });
+
+  it("a field the person changed by hand since is never overwritten: the action goes stale and shows both", async () => {
+    const proposal = (await listActionViews(odeps(), ctx)).find(
+      (v) => v.kind === "salesforce.update_opportunity" && v.status === "proposed",
+    )!;
+    opp.NextStep = "Typed by Alice in Salesforce";
+    await approveAction(odeps(), ctx, proposal.id, proposal.diff_sha256);
+    const applied = await applyAction(odeps(), ctx, proposal.id);
+    expect(applied).toMatchObject({ ok: false, reason: "stale" });
+    expect(applied.action?.error).toContain("next_step");
+    expect(opp.NextStep).toBe("Typed by Alice in Salesforce");
+    opp.NextStep = null;
+  });
+
+  it("approve → write only the diff's fields → verified by read-back → undo restores the previous values", async () => {
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE actions SET status = 'declined' WHERE kind = 'salesforce.update_opportunity'`,
+    );
+    expect(await runOpportunityPass(odeps(), ctx)).toMatchObject({ proposed: 1 });
+    const proposal = (await listActionViews(odeps(), ctx)).find(
+      (v) => v.kind === "salesforce.update_opportunity" && v.status === "proposed",
+    )!;
+    sfCalls.length = 0;
+    await approveAction(odeps(), ctx, proposal.id, proposal.diff_sha256);
+    const applied = await applyAction(odeps(), ctx, proposal.id);
+    expect(applied.ok).toBe(true);
+    expect(applied.action?.status).toBe("verified");
+    expect(opp.NextStep).toBe("send over the MSA for legal");
+    expect(opp.CloseDate).toBe("2026-09-30");
+    const patch = sfCalls.find((c) => c.method === "PATCH")!;
+    expect(JSON.parse(patch.body!)).toEqual({
+      NextStep: "send over the MSA for legal",
+      CloseDate: "2026-09-30",
+    });
+    // Read before, write, read after: three calls on the record, the last one a GET.
+    const onRecord = sfCalls
+      .filter((c) => c.url.includes("/sobjects/Opportunity/006DEAL"))
+      .map((c) => c.method);
+    expect(onRecord).toEqual(["GET", "PATCH", "GET"]);
+    const reverted = await revertAction(odeps(), ctx, proposal.id);
+    expect(reverted.ok).toBe(true);
+    expect(opp.NextStep).toBeNull();
+    expect(opp.CloseDate).toBe("2026-12-31");
+    expect((await verifyAuditChain(client.sql, { organizationId: orgId })).valid).toBe(true);
+  });
+
+  it("where the organization allows it unattended and the person promoted it, the pass applies without asking", async () => {
+    policy = orgPolicySchema.parse({
+      ...DEFAULT_ORG_POLICY,
+      unattended_medium_capabilities: ["salesforce.update_opportunity"],
+    });
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE actions SET status = 'declined' WHERE kind = 'salesforce.update_opportunity'`,
+    );
+    expect(await runOpportunityPass(odeps(), ctx)).toMatchObject({ proposed: 1, auto_applied: 0 });
+    const proposal = (await listActionViews(odeps(), ctx)).find(
+      (v) => v.kind === "salesforce.update_opportunity" && v.status === "proposed",
+    )!;
+    expect(proposal.can_promote).toBe(true);
+    expect((await promoteAction(odeps(), ctx, proposal.id)).ok).toBe(true);
+    await declineAction(odeps(), ctx, proposal.id);
+    const auto = await runOpportunityPass(odeps(), ctx);
+    expect(auto).toMatchObject({ proposed: 1, auto_applied: 1, failed: 0 });
+    expect(opp.NextStep).toBe("send over the MSA for legal");
+    const row = (await listActions(client.sql, ctx)).find(
+      (a) => a.kind === "salesforce.update_opportunity" && a.status === "verified",
+    )!;
+    expect(row.approved_by).toBe("promotion");
+    policy = DEFAULT_ORG_POLICY;
+  });
+
+  it("a write Salesforce accepted but did not keep is a failure: the read-back decides, not the status code", async () => {
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE actions SET status = 'declined' WHERE kind = 'salesforce.update_opportunity'`,
+    );
+    opp.NextStep = null;
+    opp.CloseDate = "2026-12-31";
+    expect(await runOpportunityPass(odeps(), ctx)).toMatchObject({ proposed: 1 });
+    const proposal = (await listActionViews(odeps(), ctx)).find(
+      (v) => v.kind === "salesforce.update_opportunity" && v.status === "proposed",
+    )!;
+    await approveAction(odeps(), ctx, proposal.id, proposal.diff_sha256);
+    sfIgnoresWrites = true;
+    const applied = await applyAction(odeps(), ctx, proposal.id);
+    sfIgnoresWrites = false;
+    expect(applied).toMatchObject({ ok: false, reason: "unverified" });
+    expect(applied.action?.status).toBe("failed");
+    expect(applied.action?.error).toContain("NextStep");
+    expect(applied.action?.error).toContain("CloseDate");
+    // Put the record where the next test expects it.
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE actions SET status = 'declined' WHERE kind = 'salesforce.update_opportunity'`,
+    );
+    expect(await runOpportunityPass(odeps(), ctx)).toMatchObject({ proposed: 1 });
+    const again = (await listActionViews(odeps(), ctx)).find(
+      (v) => v.kind === "salesforce.update_opportunity" && v.status === "proposed",
+    )!;
+    await approveAction(odeps(), ctx, again.id, again.diff_sha256);
+    expect((await applyAction(odeps(), ctx, again.id)).ok).toBe(true);
+    expect(opp.NextStep).toBe("send over the MSA for legal");
+  });
+
+  it("a thread that says nothing new proposes nothing; an invented date never reaches the record", async () => {
+    // The record now holds what the thread said: nothing to change.
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE actions SET status = 'declined' WHERE kind = 'salesforce.update_opportunity'`,
+    );
+    expect(await runOpportunityPass(odeps(), ctx)).toMatchObject({
+      proposed: 0,
+      nothing_to_change: 1,
+    });
+    // A model that invents a date the sentence does not hold: dropped in code.
+    const inventing: ModelProvider = {
+      ...new DeterministicModelProvider(),
+      id: "demo",
+      nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
+      draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
+      composeDraft: async () => ({ ok: false, error: "unavailable" }),
+      assessObligation: async () => ({ ok: false, error: "unavailable" }),
+      readOpportunity: async () => ({
+        ok: true,
+        value: {
+          next_step: null,
+          close_date: { value: "2026-11-15", quote: "We'd like to sign by end of quarter." },
+        },
+        usage: { input_tokens: 0, output_tokens: 0, model_alias: "fake" },
+      }),
+    };
+    const r = await runOpportunityPass({ ...odeps(), provider: inventing }, ctx);
+    expect(r).toMatchObject({ proposed: 0, ungrounded: 1 });
+    expect(opp.CloseDate).toBe("2026-09-30");
+  });
+});
+
+describe("the event stream in the sweep", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+
+  it("with the stream off nothing is derived; the first run on is a backfill over everything stored", async () => {
+    expect(await countWorkflowEvents(client.sql, ctx)).toBe(0);
+    const off = await runGmailSyncJob(deps(), ctx);
+    expect(off.ok && off.events).toBeNull();
+    expect(await countWorkflowEvents(client.sql, ctx)).toBe(0);
+
+    const on = await runGmailSyncJob({ ...deps(), events: {} }, ctx);
+    expect(on.ok).toBe(true);
+    if (!on.ok) return;
+    expect(on.events).toMatchObject({ backfill: true, refused: null });
+    expect(on.events!.written).toBeGreaterThan(0);
+    expect(on.events!.written).toBe(on.events!.derived);
+    const events = await listWorkflowEvents(client.sql, ctx);
+    expect(events.length).toBe(on.events!.written);
+    // Everything this person did so far is in it: mail both ways, the
+    // meeting that happened, the writes that landed, the clicks.
+    const kinds = new Set(events.map((e) => `${e.source}:${e.target.semantic_type}`));
+    expect(kinds.has("google:sent_new")).toBe(true);
+    expect(kinds.has("google:received_reply")).toBe(true);
+    expect(kinds.has("salesforce:update_opportunity")).toBe(true);
+    expect(kinds.has("product:approve_update_opportunity")).toBe(true);
+    expect(kinds.has("product:intent_stated")).toBe(true);
+    // And nothing anyone wrote.
+    const json = JSON.stringify(events);
+    expect(json).not.toContain("@");
+    expect(json).not.toContain("Enterprise pricing");
+    expect(json).not.toContain("MSA");
+  });
+
+  it("a second run derives only what moved and writes nothing twice", async () => {
+    const before = await countWorkflowEvents(client.sql, ctx);
+    const again = await runEventStep({ sql: client.sql, now: () => NOW }, ctx);
+    expect(again.backfill).toBe(false);
+    expect(again.written).toBe(0);
+    expect(await countWorkflowEvents(client.sql, ctx)).toBe(before);
+    // Something moves: a new decision.
+    const pending = await listPendingObligations(client.sql, ctx, 10, { agent: false });
+    expect(pending.length).toBeGreaterThan(0);
+    await setObligationOutcome(client.sql, ctx, pending[0]!.id, "dismissed");
+    const moved = await runEventStep({ sql: client.sql, now: () => NOW }, ctx);
+    expect(moved.written).toBe(1);
+    expect(await countWorkflowEvents(client.sql, ctx)).toBe(before + 1);
+  });
+
+  it("the stream is what discovery reads: every event projects to a feature; the engine's on-device defaults lose sparse connector events, a day-wide boundary keeps them", async () => {
+    const events = await listWorkflowEvents(client.sql, ctx);
+    const features = events.map((e) => patternFeatureEventSchema.parse(toPatternFeature(e)));
+    expect(features.length).toBe(events.length);
+    // Finding for step 2: episodes close after ten quiet minutes and need
+    // three events, which fits a screen, not a mailbox. Most events here
+    // fall between episodes.
+    const defaults = runPatternEngine(features, { owner_user_id: alice, now: () => NOW });
+    const covered = (r: typeof defaults) => r.episodes.reduce((n, e) => n + e.events.length, 0);
+    expect(covered(defaults)).toBeLessThan(events.length);
+    // With boundaries fitted to connector cadence the same events group.
+    const day = 24 * 60 * 60 * 1000;
+    const fitted = runPatternEngine(features, {
+      owner_user_id: alice,
+      now: () => NOW,
+      segmentation: { event_gap_boundary_ms: day, inactivity_boundary_ms: day },
+    });
+    expect(fitted.episodes.length).toBeGreaterThan(0);
+    expect(covered(fitted)).toBeGreaterThanOrEqual(covered(defaults));
+  });
+
+  it("a colleague's stream is empty", async () => {
+    expect(await listWorkflowEvents(client.sql, { organizationId: orgId, userId: bob })).toEqual(
+      [],
+    );
   });
 });

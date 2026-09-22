@@ -464,3 +464,11 @@ a.button {
     width: 100%;
   }
 }
+
+.quote {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+  border-left: 2px solid var(--line);
+  padding-left: 8px;
+}

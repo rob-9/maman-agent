@@ -14,6 +14,7 @@ import {
   MemoryIdempotencyStore,
   realAdapterRegistry,
   salesforceActivityWriter,
+  salesforceOpportunityWriter,
 } from "@maman/connector-adapters";
 import { createModelProvider, DeterministicModelProvider } from "@maman/model-provider";
 import { deterministicContextComposer, modelComposer } from "@maman/voice-engine";
@@ -127,6 +128,14 @@ const sink: PersistenceSink = {
   },
 };
 
+/** The organization's connectors, from the org vault. */
+const orgCredentials = createVaultCredentialProvider({
+  sql,
+  masterKey,
+  transport: createConnectorTokenTransport(),
+  clientCredentials: orgClientCredentials,
+});
+
 /** The sweep's activities: the on-demand sync job, run per person from the schedule. */
 function buildSweepActivities() {
   const credentials = createUserVaultCredentialProvider({
@@ -167,17 +176,15 @@ function buildSweepActivities() {
     // Writes to the organization's CRM for what each person sent: proposed
     // always, applied without asking only under their own promotion.
     actions: {
-      writer: salesforceActivityWriter({
-        credentials: createVaultCredentialProvider({
-          sql,
-          masterKey,
-          transport: createConnectorTokenTransport(),
-          clientCredentials: orgClientCredentials,
-        }),
+      writer: salesforceActivityWriter({ credentials: orgCredentials, transport: fetchTransport }),
+      opportunities: salesforceOpportunityWriter({
+        credentials: orgCredentials,
         transport: fetchTransport,
       }),
       orgPolicy: orgPolicyResolver(sql),
     },
+    // The event stream, unless switched off.
+    ...(env.EVENT_STREAM === "off" ? {} : { events: {} }),
     // The organization's CRM (org vault), asked about each person's contacts.
     deals: resolveDealSource({
       sql,

@@ -26,10 +26,11 @@
     "@temporalio/workflow": "^1.11.5",
     "@maman/model-provider": "workspace:*",
     "@maman/voice-engine": "workspace:*",
-    "@maman/policy-engine": "workspace:*"
+    "@maman/policy-engine": "workspace:*",
+    "@maman/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@maman/contracts": "workspace:*",
+    "@maman/pattern-engine": "workspace:*",
     "@maman/tsconfig": "workspace:*",
     "@testcontainers/postgresql": "^12.0.4",
     "@types/node": "^24",

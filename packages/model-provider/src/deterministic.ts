@@ -22,6 +22,13 @@ import {
   type DraftInput,
   type DraftOutput,
 } from "./draft.js";
+import {
+  opportunityInputSchema,
+  opportunityOutputSchema,
+  readOpportunityDeterministically,
+  type OpportunityInput,
+  type OpportunityOutput,
+} from "./opportunity.js";
 
 /**
  * DemoModelProvider: fully deterministic, zero-credential implementation that
@@ -115,6 +122,21 @@ export class DeterministicModelProvider implements ModelProvider {
       return { ok: false, error: "policy_violation", detail: "invalid draft input" };
     }
     const validated = draftOutputSchema.safeParse(composeDeterministically(parsed.data));
+    if (!validated.success) return { ok: false, error: "invalid_output" };
+    return {
+      ok: true,
+      value: validated.data,
+      usage: { input_tokens: 0, output_tokens: 0, model_alias: "demo" },
+    };
+  }
+  async readOpportunity(input: OpportunityInput): Promise<ModelResult<OpportunityOutput>> {
+    const parsed = opportunityInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "policy_violation", detail: "invalid opportunity input" };
+    }
+    const validated = opportunityOutputSchema.safeParse(
+      readOpportunityDeterministically(parsed.data),
+    );
     if (!validated.success) return { ok: false, error: "invalid_output" };
     return {
       ok: true,

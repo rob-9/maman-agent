@@ -2,6 +2,7 @@ import { looksLikeSecret } from "@maman/contracts";
 import { z } from "zod";
 import type { AssessmentInput, AssessmentOutput } from "./assessment.js";
 import type { DraftInput, DraftOutput } from "./draft.js";
+import type { OpportunityInput, OpportunityOutput } from "./opportunity.js";
 
 /**
  * ModelProvider interface. LLM output is UNTRUSTED DATA everywhere:
@@ -124,6 +125,13 @@ export interface ModelProvider {
    * word on what is claimed.
    */
   composeDraft(input: DraftInput): Promise<ModelResult<DraftOutput>>;
+  /**
+   * Facts read from the thread for the opportunity record: next step, close
+   * date, each with the sentence it came from. The caller grounds every
+   * quote against the thread and every date against its own reading; an
+   * ungrounded field is dropped, never written.
+   */
+  readOpportunity(input: OpportunityInput): Promise<ModelResult<OpportunityOutput>>;
 }
 
 /** Rejects any capability id that was not offered in the prompt. */

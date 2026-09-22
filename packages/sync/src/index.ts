@@ -48,7 +48,9 @@ export { runDraftJob, type DraftJobDeps, type DraftJobResult } from "./draft-job
 export { runPredraft, type PredraftDeps, type PredraftResult } from "./predraft.js";
 export {
   LOG_ACTIVITY,
+  UPDATE_OPPORTUNITY,
   applyAction,
+  proposeOpportunityUpdate,
   approveAction,
   autoActions,
   declineAction,
@@ -62,4 +64,19 @@ export {
   type ActionDeps,
   type ActionView,
   type ActivityDiff,
+  type FieldChange,
+  type OpportunityDiff,
 } from "./actions.js";
+export {
+  runOpportunityPass,
+  type OpportunityPassDeps,
+  type OpportunityPassResult,
+} from "./opportunity-pass.js";
+export {
+  deriveEvents,
+  runEventStep,
+  EVENT_WINDOW_DAYS,
+  type DerivedEvent,
+  type EventStepDeps,
+  type EventStepResult,
+} from "./events.js";

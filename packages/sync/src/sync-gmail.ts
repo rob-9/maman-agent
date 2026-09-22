@@ -25,6 +25,8 @@ import type { DealSourceResolver } from "./deal-source.js";
 import { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
 import { runPredraft, type PredraftResult } from "./predraft.js";
 import { autoActions, sentFromMatchedDrafts, type ActionDeps } from "./actions.js";
+import { runOpportunityPass, type OpportunityPassResult } from "./opportunity-pass.js";
+import { runEventStep, type EventStepResult } from "./events.js";
 import type { ContextComposer } from "@maman/voice-engine";
 import { toSyncedMessage } from "./content.js";
 import { matchSentDrafts } from "./voice.js";
@@ -71,7 +73,14 @@ export type GmailSyncJobDeps = {
    * action is ever proposed. Present → proposed for every draft matched to a
    * sent message, and applied without asking only under a promotion.
    */
-  actions?: Pick<ActionDeps, "writer" | "orgPolicy"> | undefined;
+  actions?: Pick<ActionDeps, "writer" | "opportunities" | "orgPolicy"> | undefined;
+  /**
+   * The event stream (EVENT_STREAM=on, the default). Absent → nothing is
+   * derived and nothing else changes. Present → every synced fact and every
+   * click becomes an event in the person's store, after the rest of the
+   * sweep so this sweep's own writes are included.
+   */
+  events?: { window_days?: number | undefined } | undefined;
 };
 
 export type DealStepResult =
@@ -101,6 +110,8 @@ export type GmailSyncJobResult =
       agent: AgentPassResult | null;
       predraft: PredraftResult | null;
       actions: { proposed: number; auto_applied: number; auto_failed: number } | null;
+      opportunity: OpportunityPassResult | null;
+      events: EventStepResult | null;
     }
   | { ok: false; reason: "no_connection" | "sync_failed"; error?: string };
 
@@ -222,6 +233,23 @@ export async function runGmailSyncJob(
       )
     : null;
 
+  // What the thread says about the deal, read after judgment and proposed
+  // with the sentence attached. Applied without asking only where the
+  // organization allows a medium-risk write unattended and the person asked.
+  const opportunity =
+    deps.agent && deps.actions
+      ? await runOpportunityPass(
+          {
+            ...deps.actions,
+            sql: deps.sql,
+            contentKey: deps.contentKey,
+            now: deps.now,
+            provider: deps.agent.provider,
+          },
+          ctx,
+        )
+      : null;
+
   // Then the drafts, for what the agent judged owed. After judgment, never
   // instead of it: a draft written for a thread nobody read is noise in
   // the person's own Drafts folder.
@@ -240,6 +268,18 @@ export async function runGmailSyncJob(
           ctx,
         )
       : null;
+
+  // What happened, as events, last: this sweep's own writes and decisions
+  // are facts too. A refused batch is reported, never thrown; the stream is
+  // an input to discovery, not a step the mailbox depends on.
+  const events = deps.events
+    ? await runEventStep({ sql: deps.sql, now: deps.now }, ctx, deps.events).catch((e) => ({
+        backfill: false,
+        derived: 0,
+        written: 0,
+        refused: e instanceof Error ? e.message : String(e),
+      }))
+    : null;
 
   await markUserConnectionSync(deps.sql, ctx, conn.id, { ok: true, at: now });
 
@@ -261,6 +301,8 @@ export async function runGmailSyncJob(
     agent,
     predraft,
     actions,
+    opportunity,
+    events,
   };
 }
 

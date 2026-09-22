@@ -20,6 +20,7 @@ import {
   fetchTransport,
   gmailContentReader,
   salesforceActivityWriter,
+  salesforceOpportunityWriter,
   type HttpTransport,
 } from "@maman/connector-adapters";
 import {
@@ -31,6 +32,7 @@ import {
   listUserConnections,
   setObligationOutcome,
   type UserContext,
+  listWorkflowEvents,
 } from "@maman/db";
 import {
   createOrgVaultCredentialProvider,
@@ -47,6 +49,7 @@ import {
   resolveDealSource,
   revertAction,
   runDraftJob,
+  runOpportunityPass,
   skippedWithReasons,
   stateIntent,
   runGmailSyncJob,
@@ -137,21 +140,22 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         }
       : null;
   /** Writes to the organization's CRM: the org vault, the org's policy, this person's ledger. */
-  const actionDeps = (sql: Sql) => ({
-    sql,
-    contentKey: master,
-    writer: salesforceActivityWriter({
-      credentials: createOrgVaultCredentialProvider({
-        sql,
-        masterKey: master,
-        transport: tokenTransport,
-        clientCredentials: orgClientFor,
-      }),
-      transport: crmTransport,
-    }),
-    orgPolicy: orgPolicyResolver(sql),
-    now,
-  });
+  const actionDeps = (sql: Sql) => {
+    const credentials = createOrgVaultCredentialProvider({
+      sql,
+      masterKey: master,
+      transport: tokenTransport,
+      clientCredentials: orgClientFor,
+    });
+    return {
+      sql,
+      contentKey: master,
+      writer: salesforceActivityWriter({ credentials, transport: crmTransport }),
+      opportunities: salesforceOpportunityWriter({ credentials, transport: crmTransport }),
+      orgPolicy: orgPolicyResolver(sql),
+      now,
+    };
+  };
 
   /** The organization's CRM, looked up per sync; the org vault, never the user's. */
   const dealsFor = (sql: Sql) =>
@@ -320,6 +324,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         contentKey: master,
         deals: dealsFor(sql),
         actions: actionDeps(sql),
+        // The event stream, unless switched off.
+        ...(env.EVENT_STREAM === "off" ? {} : { events: {} }),
         // The agent pass runs only when switched on; off means the list is
         // the deterministic ranking, exactly as before the agent existed.
         ...(agentOn
@@ -452,6 +458,17 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     return { id, status: "retired" };
   });
 
+  // ---- the event stream: what the person did, as discovery sees it ----
+
+  app.get("/v1/me/events", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const q = req.query as { limit?: string };
+    const limit = Math.min(5000, Math.max(1, Number(q.limit ?? 500) || 500));
+    return { events: await listWorkflowEvents(deps.sql, userCtx(principal), { limit }) };
+  });
+
   // ---- actions: writes to the organization's CRM, with the receipts ----
 
   app.get("/v1/me/actions", { schema: { tags: ["me"] } }, async (req, reply) => {
@@ -487,6 +504,31 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
       action: { id: proposed.id, diff_sha256: proposed.diff_sha256, status: proposed.status },
     };
   });
+
+  /** "Update Salesforce" on a card: read this thread for the deal's next step and close date, and propose. */
+  app.post(
+    "/v1/me/obligations/:id/update-crm",
+    { schema: { tags: ["me"] } },
+    async (req, reply) => {
+      const principal = await requirePrincipal(req, reply);
+      if (!principal) return;
+      if (!deps.sql) return reply.status(503).send({ status: 503 });
+      const ctx = userCtx(principal);
+      const id = (req.params as { id: string }).id;
+      const target = await getObligationForDraft(deps.sql, ctx, id);
+      if (!target) return reply.status(404).send({ status: 404, title: "Not Found" });
+      const r = await runOpportunityPass(
+        {
+          ...actionDeps(deps.sql),
+          provider: modelProvider,
+          max_candidates: 50,
+          only_thread_id: target.thread.id,
+        },
+        ctx,
+      );
+      return { result: r };
+    },
+  );
 
   const approveBody = z.object({ diff_sha256: z.string().min(1) }).strict();
 

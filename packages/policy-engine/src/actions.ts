@@ -10,7 +10,14 @@ import type { OrgPolicy } from "./org-policy.js";
  * person promotes them. Anything involving judgment stays at "propose".
  */
 export const ACTION_KINDS = {
+  /** Witnessed and undoable: may run unattended once the person promotes it. */
   "salesforce.log_activity": { risk: "low", reversible: true, unattended_allowed: true },
+  /**
+   * Read from the thread, with the sentence attached; undoable. Medium: it
+   * moves a forecast field, so it runs unattended only where the
+   * organization has listed it (unattended_medium_capabilities).
+   */
+  "salesforce.update_opportunity": { risk: "medium", reversible: true, unattended_allowed: true },
 } as const;
 export type ActionKind = keyof typeof ACTION_KINDS;
 

@@ -91,3 +91,10 @@ export {
   type SalesforceActivityWriter,
   type TaskRecord,
 } from "./salesforce-activity.js";
+export {
+  salesforceOpportunityWriter,
+  type OpportunityFields,
+  type OpportunityRecord,
+  type SalesforceOpportunityConfig,
+  type SalesforceOpportunityWriter,
+} from "./salesforce-opportunity.js";

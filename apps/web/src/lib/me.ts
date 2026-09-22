@@ -86,12 +86,14 @@ export type ActionView = {
   diff_sha256: string;
   summary: string;
   detail: string;
+  quotes: string[];
   approved_by: "user" | "promotion" | null;
   external_id: string | null;
   verified: boolean;
   error: string | null;
   created_at: string;
   can_revert: boolean;
+  can_promote: boolean;
 };
 
 export type OrgConnectorView = {
@@ -113,6 +115,11 @@ export const me = {
     }>("GET", "/v1/me/obligations"),
   intents: () => call<{ intents: IntentView[] }>("GET", "/v1/me/intents"),
   actions: () => call<{ actions: ActionView[] }>("GET", "/v1/me/actions"),
+  proposeCrmUpdate: (obligationId: string) =>
+    call<{ result: { proposed: number; nothing_to_change: number } }>(
+      "POST",
+      `/v1/me/obligations/${obligationId}/update-crm`,
+    ),
   proposeLog: (obligationId: string) =>
     call<{ action: { id: string; diff_sha256: string } }>(
       "POST",

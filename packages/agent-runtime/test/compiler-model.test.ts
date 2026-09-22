@@ -68,6 +68,9 @@ class MockModel implements ModelProvider {
   async composeDraft(): Promise<ModelResult<never>> {
     return { ok: false, error: "unavailable" };
   }
+  async readOpportunity(): Promise<ModelResult<never>> {
+    return { ok: false, error: "unavailable" };
+  }
   async nameRecommendation(_input: NamingInput): Promise<ModelResult<NamingOutput>> {
     return (
       this.opts.naming ?? {

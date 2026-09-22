@@ -65,6 +65,12 @@ export const serverEnvSchema = z
     AGENT_MODE: z.enum(["off", "assist"]).optional(),
     /** Drafts the sweep writes per person per sweep, when the agent is on. Default 3, 0 disables. */
     PREDRAFT_PER_SWEEP: z.coerce.number().int().min(0).max(20).optional(),
+    /**
+     * The event stream: every synced fact and every click derived into the
+     * person's store as canonical events, for discovery. `on` (default).
+     * `off`: nothing is derived; the rest of the product is unchanged.
+     */
+    EVENT_STREAM: z.enum(["off", "on"]).optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production") {
