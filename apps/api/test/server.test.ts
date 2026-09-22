@@ -3,6 +3,15 @@ import type { FastifyInstance } from "fastify";
 import { uuidv7 } from "@maman/contracts";
 import type { ServerEnv } from "@maman/config";
 import { buildServer } from "../src/server.js";
+import {
+  createAuthenticator,
+  WorkosAuthenticator,
+  type WorkosIdentityResolver,
+  type WorkosTokenVerifier,
+} from "../src/auth.js";
+
+const rejectingVerifier: WorkosTokenVerifier = { verifyAccessToken: async () => null };
+const rejectingResolver: WorkosIdentityResolver = { resolvePrincipal: async () => null };
 
 const baseEnv: ServerEnv = {
   NODE_ENV: "test",
@@ -46,7 +55,7 @@ describe("production guard", () => {
     );
   });
 
-  it("builds with workos auth in production", () => {
+  it("builds with workos auth in production when the pieces are real", () => {
     const prod = buildServer({
       env: {
         ...baseEnv,
@@ -55,8 +64,26 @@ describe("production guard", () => {
         WORKOS_API_KEY: "sk_test",
         WORKOS_CLIENT_ID: "client",
       },
+      authenticator: new WorkosAuthenticator(rejectingVerifier, rejectingResolver),
     });
     expect(prod).toBeTruthy();
+  });
+
+  it("refuses to build AUTH_MODE=workos without credentials — no stub that looks wired", () => {
+    expect(() => createAuthenticator({ ...baseEnv, AUTH_MODE: "workos" })).toThrow(
+      /WORKOS_CLIENT_ID/,
+    );
+    expect(() =>
+      createAuthenticator({ ...baseEnv, AUTH_MODE: "workos", WORKOS_CLIENT_ID: "client" }),
+    ).toThrow(/WORKOS_API_KEY/);
+    expect(() =>
+      createAuthenticator({
+        ...baseEnv,
+        AUTH_MODE: "workos",
+        WORKOS_CLIENT_ID: "client",
+        WORKOS_API_KEY: "sk_test",
+      }),
+    ).toThrow(/database/);
   });
 });
 
@@ -98,15 +125,21 @@ describe("authentication", () => {
   });
 
   it("ignores dev identity headers when AUTH_MODE=workos", async () => {
-    const workosApp = buildServer({ env: { ...baseEnv, AUTH_MODE: "workos" } });
+    const workosApp = buildServer({
+      env: { ...baseEnv, AUTH_MODE: "workos", WORKOS_API_KEY: "sk_test", WORKOS_CLIENT_ID: "c" },
+      authenticator: new WorkosAuthenticator(rejectingVerifier, rejectingResolver),
+    });
     await workosApp.ready();
     const res = await workosApp.inject({ method: "GET", url: "/v1/me", headers: devHeaders() });
     expect(res.statusCode).toBe(401);
     await workosApp.close();
   });
 
-  it("rejects a bearer token when WorkOS is unconfigured", async () => {
-    const workosApp = buildServer({ env: { ...baseEnv, AUTH_MODE: "workos" } });
+  it("rejects a bearer token the verifier does not accept", async () => {
+    const workosApp = buildServer({
+      env: { ...baseEnv, AUTH_MODE: "workos", WORKOS_API_KEY: "sk_test", WORKOS_CLIENT_ID: "c" },
+      authenticator: new WorkosAuthenticator(rejectingVerifier, rejectingResolver),
+    });
     await workosApp.ready();
     const res = await workosApp.inject({
       method: "GET",

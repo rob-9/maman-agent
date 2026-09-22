@@ -38,6 +38,36 @@ export async function globalGetUserByWorkosId(sql: Sql, workosUserId: string) {
   return rows[0] ?? null;
 }
 
+export async function globalGetOrganizationByWorkosId(sql: Sql, workosOrganizationId: string) {
+  const rows = await drizzle(sql)
+    .select()
+    .from(schema.organizations)
+    .where(eq(schema.organizations.workos_organization_id, workosOrganizationId));
+  return rows[0] ?? null;
+}
+
+/**
+ * Just-in-time provisioning for sign-in. Insert-if-absent then read, so two
+ * first requests racing for the same person (a page that fetches twice) end
+ * with ONE row and both callers holding it. The identity provider is the
+ * source of truth for who exists; these rows are our handle on them.
+ */
+export async function globalEnsureUserByWorkosId(sql: Sql, user: NewUser) {
+  await drizzle(sql)
+    .insert(schema.users)
+    .values(user)
+    .onConflictDoNothing({ target: schema.users.workos_user_id });
+  return (await globalGetUserByWorkosId(sql, user.workos_user_id))!;
+}
+
+export async function globalEnsureOrganizationByWorkosId(sql: Sql, org: NewOrganization) {
+  await drizzle(sql)
+    .insert(schema.organizations)
+    .values(org)
+    .onConflictDoNothing({ target: schema.organizations.workos_organization_id });
+  return (await globalGetOrganizationByWorkosId(sql, org.workos_organization_id))!;
+}
+
 // ---------- memberships ----------
 
 export async function addMembership(
@@ -56,6 +86,42 @@ export async function addMembership(
       })
       .returning();
     return row!;
+  });
+}
+
+/**
+ * Insert-if-absent membership, then read. The role given here is used ONLY
+ * when the row is created; an existing row's role is the organization's own
+ * decision (managed under org.members.manage) and is never overwritten by a
+ * sign-in.
+ */
+export async function ensureMembership(
+  sql: Sql,
+  ctx: TenantContext,
+  input: { user_id: string; role: OrganizationRole },
+) {
+  return withTenant(sql, ctx, async (tx) => {
+    await db(tx)
+      .insert(schema.memberships)
+      .values({
+        organization_id: ctx.organizationId,
+        user_id: input.user_id,
+        role: input.role,
+        status: "active",
+      })
+      .onConflictDoNothing({
+        target: [schema.memberships.organization_id, schema.memberships.user_id],
+      });
+    const rows = await db(tx)
+      .select()
+      .from(schema.memberships)
+      .where(
+        and(
+          eq(schema.memberships.organization_id, ctx.organizationId),
+          eq(schema.memberships.user_id, input.user_id),
+        ),
+      );
+    return rows[0]!;
   });
 }
 

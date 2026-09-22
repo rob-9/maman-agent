@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { principalSchema, type Principal } from "@maman/contracts";
 import type { ServerEnv } from "@maman/config";
+import type { Sql } from "postgres";
 import { isDeviceToken, verifyDeviceToken } from "./device-token.js";
+import { createWorkosDirectory, DbWorkosIdentityResolver, JwksWorkosVerifier } from "./workos.js";
 
 /**
  * Authentication strategies behind a single interface.
@@ -10,9 +12,10 @@ import { isDeviceToken, verifyDeviceToken } from "./device-token.js";
  * - dev:    identity headers, accepted ONLY when AUTH_MODE=dev (which itself is
  *           refused when NODE_ENV=production by env validation AND by an
  *           explicit guard in buildServer).
- * - workos: Bearer token verification through the WorkOS adapter. The adapter
- *           interface is complete; live verification activates when WorkOS
- *           credentials are configured.
+ * - workos: Bearer access tokens issued by WorkOS AuthKit, signature-verified
+ *           against WorkOS's published keys and mapped to our rows (workos.ts).
+ *           Refuses to construct without credentials and a database — there
+ *           is no "unconfigured" mode that quietly rejects everyone.
  * - device: HMAC-signed device tokens minted at enrollment. Tried first so the
  *           desktop app authenticates without a user session; falls through to
  *           the user authenticator for everything else.
@@ -133,26 +136,42 @@ export class WorkosAuthenticator implements Authenticator {
   }
 }
 
-/** Placeholder verifier used until WORKOS_API_KEY is configured: rejects everything. */
-export class UnconfiguredWorkosVerifier implements WorkosTokenVerifier {
-  async verifyAccessToken(): Promise<null> {
-    return null;
-  }
-}
+export type AuthenticatorDeps = {
+  verifier?: WorkosTokenVerifier;
+  resolver?: WorkosIdentityResolver;
+  sql?: Sql | undefined;
+};
 
-export function createAuthenticator(
-  env: ServerEnv,
-  deps?: { verifier?: WorkosTokenVerifier; resolver?: WorkosIdentityResolver },
-): Authenticator {
+/**
+ * Builds the user authenticator for the configured AUTH_MODE. In workos mode
+ * the pieces are real or the server does not start: env validation already
+ * requires the credentials, and the resolver needs the database because a
+ * principal IS a row in it.
+ */
+export function createAuthenticator(env: ServerEnv, deps: AuthenticatorDeps = {}): Authenticator {
   if (env.AUTH_MODE === "dev") {
     return new DevAuthenticator();
   }
-  const verifier = deps?.verifier ?? new UnconfiguredWorkosVerifier();
-  const resolver =
-    deps?.resolver ??
-    ({
-      resolvePrincipal: async () => null,
-    } satisfies WorkosIdentityResolver);
+  let verifier = deps.verifier;
+  if (!verifier) {
+    if (!env.WORKOS_CLIENT_ID) {
+      throw new Error("FATAL: AUTH_MODE=workos requires WORKOS_CLIENT_ID.");
+    }
+    verifier = JwksWorkosVerifier.forClient(env.WORKOS_CLIENT_ID);
+  }
+  let resolver = deps.resolver;
+  if (!resolver) {
+    if (!env.WORKOS_API_KEY) {
+      throw new Error("FATAL: AUTH_MODE=workos requires WORKOS_API_KEY.");
+    }
+    if (!deps.sql) {
+      throw new Error("FATAL: AUTH_MODE=workos requires a database to resolve principals.");
+    }
+    resolver = new DbWorkosIdentityResolver(
+      deps.sql,
+      createWorkosDirectory({ apiKey: env.WORKOS_API_KEY }),
+    );
+  }
   return new WorkosAuthenticator(verifier, resolver);
 }
 

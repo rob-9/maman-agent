@@ -56,13 +56,17 @@ export const serverEnvSchema = z
           message: "AUTH_MODE=dev is forbidden when NODE_ENV=production.",
         });
       }
-      if (env.AUTH_MODE === "workos" && (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["WORKOS_API_KEY"],
-          message: "WORKOS_API_KEY and WORKOS_CLIENT_ID are required when AUTH_MODE=workos.",
-        });
-      }
+    }
+
+    // Real auth is real in every environment. AUTH_MODE=workos with no
+    // credentials would be a server that rejects every sign-in while looking
+    // wired — the one failure mode worse than crashing at start.
+    if (env.AUTH_MODE === "workos" && (!env.WORKOS_API_KEY || !env.WORKOS_CLIENT_ID)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["WORKOS_API_KEY"],
+        message: "WORKOS_API_KEY and WORKOS_CLIENT_ID are required when AUTH_MODE=workos.",
+      });
     }
 
     // These run in every environment so a local trial fails fast with an

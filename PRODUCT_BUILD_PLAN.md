@@ -396,20 +396,21 @@ Each of these is real, found in this codebase, and cost something.
 
 ### Progress
 
-| Item                                                            | State                                                                                                                       |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                                                      |
-| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd                                          |
-| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                                                     |
-| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                                                           |
-| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled                                            |
-| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills                                    |
-| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end                                            |
-| **`/v1/me/*` — the demo path over HTTP**                        | ✅ connect Gmail → sync → ranked list → act; 11 integration tests, two users in one org; 2 drills                           |
-| `@maman/sync` package                                           | ✅ sync job + per-user vault, consumed by api now and worker in Phase 2                                                     |
-| CRM connector                                                   | ☐ next — find out which CRM first                                                                                           |
-| Web UI — Inbox + Connections                                    | ✅ `apps/web` is the product; server components + server actions, identity never in the browser; admin moved under `/admin` |
-| Draft creation (`gmail.compose`, never send)                    | ✅ `gmail-draft.ts` + `voice-engine` deterministic composer + `POST /v1/me/obligations/:id/draft`; failure branch tested    |
+| Item                                                            | State                                                                                                                                            |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                                                                           |
+| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd                                                               |
+| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                                                                          |
+| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                                                                                |
+| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled                                                                 |
+| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills                                                         |
+| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end                                                                 |
+| **`/v1/me/*` — the demo path over HTTP**                        | ✅ connect Gmail → sync → ranked list → act; 11 integration tests, two users in one org; 2 drills                                                |
+| `@maman/sync` package                                           | ✅ sync job + per-user vault, consumed by api now and worker in Phase 2                                                                          |
+| CRM connector                                                   | ☐ next — find out which CRM first                                                                                                                |
+| Web UI — Inbox + Connections                                    | ✅ `apps/web` is the product; server components + server actions, identity never in the browser; admin moved under `/admin`                      |
+| Draft creation (`gmail.compose`, never send)                    | ✅ `gmail-draft.ts` + `voice-engine` deterministic composer + `POST /v1/me/obligations/:id/draft`; failure branch tested                         |
+| Real auth (WorkOS AuthKit)                                      | ✅ `apps/api/src/workos.ts` JWKS verifier + JIT-provisioning resolver; web sign-in/out via `authkit-nextjs`; 12 unit + 12 integration, 3 drilled |
 
 **Landed defect, worth keeping:** the first RLS policy spelled the guard as
 `current_setting('app.user_id', true)::uuid`. That returns NULL only while a
@@ -513,6 +514,51 @@ replaces one function.
 
 Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
 **117** (sync 5, worker 7, db 63, api 42) · build 5/5.
+
+**Real auth.** WorkOS AuthKit, because the schema (`workos_user_id`,
+`workos_organization_id`), the env contract and the adapter interface were
+already shaped for it, and because AuthKit is Google sign-in for a Gmail team
+today and SSO for an enterprise later without a code change. The split that
+matters: the WEB app signs people in and holds a sealed session cookie; the
+API trusts none of that — it verifies each bearer's signature against WorkOS's
+published keys (`/sso/jwks/{client_id}`) itself, then maps the identity to
+our rows. The web app cannot mint a principal.
+
+First sight of a person provisions their user, their organization and an
+active membership (after WorkOS confirms the membership is active), with
+insert-if-absent so three racing first requests end with one row — a test
+that HOLDS all three callers at a gate until each has read "no row yet",
+because the un-gated version passed even without the guard. After that, our
+rows are the truth: a membership an admin suspends here stays suspended
+whatever WorkOS says. The initial role maps `admin → org_admin`, everything
+else `member`, and is never rewritten by a sign-in. A token with no `org_id`
+is refused: nothing in this system lives outside an organization, and the
+web app explains "you are not in a team yet" instead.
+
+The "never a stub that looks wired" rule (§10) is now enforced, not stated:
+`AUTH_MODE=workos` without both WorkOS credentials fails env validation in
+EVERY environment, and `createAuthenticator` throws without a database. The
+old `UnconfiguredWorkosVerifier` — which rejected every token while looking
+configured — is gone. Resolved principals are cached 60s per process, so an
+authenticated request costs one signature check; the documented consequence
+is that a suspension takes up to a minute to bite.
+
+Dev mode is unchanged in kind and better in practice: with nothing set, the
+web app resolves the seeded demo member (`user_demo_alex`) through the
+dev-only routes, so `pnpm demo` opens a working inbox with zero
+configuration. `AUTH_MODE` is read by BOTH processes, so they cannot disagree
+about how a person is identified.
+
+Not exercised here: a live round-trip against WorkOS (no credentials on this
+machine). The verifier is tested with a locally generated RSA key set and the
+directory client against a scripted fetch that pins the paths and the bearer;
+what remains is dashboard configuration (redirect URI `${WEB_BASE_URL}/callback`,
+logout redirect `/signed-out`), documented in `.env.example`.
+
+**Phase 1 remaining:** CRM connector (which one?), scheduled sweeps.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**129** (sync 5, worker 7, db 63, api 54) · build 5/5.
 
 **Phase 1 — foundations + first value (2–3 weeks).**
 Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.

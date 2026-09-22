@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { me } from "./me.js";
+import { endSession, signInUrl } from "./session.js";
 
 /**
  * Mutations run on the server so identity never reaches the browser. Each
@@ -41,4 +42,12 @@ export async function connectAction(provider: string): Promise<void> {
   const res = await me.authorize(provider);
   if (!res.ok) throw new Error(`could not start ${provider} connection (${res.status})`);
   redirect(res.data.authorization_url);
+}
+
+export async function signInAction(): Promise<void> {
+  redirect(await signInUrl());
+}
+
+export async function signOutAction(): Promise<void> {
+  await endSession();
 }

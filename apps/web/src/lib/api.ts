@@ -1,4 +1,4 @@
-import { product } from "@maman/config";
+import { authMode, identityHeaders } from "./session.js";
 
 /**
  * Server-side API client for the admin console. In dev it authenticates with
@@ -35,8 +35,9 @@ export type AuditEntry = {
 };
 
 async function adminHeaders(): Promise<Record<string, string>> {
-  // Demo/dev: resolve the seeded org + a org_admin identity for read-only
-  // aggregate access. Production swaps this for the WorkOS session token.
+  // Real auth: the signed-in person's bearer; the API decides from THEIR
+  // role whether admin routes answer. Dev: the seeded org as an org_admin.
+  if (authMode() === "workos") return identityHeaders();
   return {
     "x-dev-org-id": await resolveDemoOrgId(),
     "x-dev-user-id": "00000000-0000-7000-8000-0000000000ad",
@@ -81,4 +82,4 @@ export const admin = {
   audit: () => get<AuditEntry[]>("/v1/admin/audit"),
 };
 
-export const branding = product;
+export { branding } from "./branding.js";

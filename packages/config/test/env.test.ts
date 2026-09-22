@@ -47,6 +47,21 @@ describe("loadServerEnv", () => {
     ).toThrow(EnvValidationError);
   });
 
+  it("rejects workos auth without credentials in development too — never a stub", () => {
+    expect(() => loadServerEnv({ ...validDev, AUTH_MODE: "workos" })).toThrow(EnvValidationError);
+    expect(() =>
+      loadServerEnv({ ...validDev, AUTH_MODE: "workos", WORKOS_CLIENT_ID: "client_123" }),
+    ).toThrow(EnvValidationError);
+    expect(
+      loadServerEnv({
+        ...validDev,
+        AUTH_MODE: "workos",
+        WORKOS_API_KEY: "sk_test_workos",
+        WORKOS_CLIENT_ID: "client_123",
+      }).AUTH_MODE,
+    ).toBe("workos");
+  });
+
   it("rejects production anthropic provider without an API key", () => {
     expect(() =>
       loadServerEnv({

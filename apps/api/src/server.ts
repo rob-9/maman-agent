@@ -104,7 +104,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   );
   const authenticator = new CompositeAuthenticator(
     deviceAuth,
-    deps.authenticator ?? createAuthenticator(env),
+    deps.authenticator ?? createAuthenticator(env, { sql }),
   );
 
   const app = Fastify({

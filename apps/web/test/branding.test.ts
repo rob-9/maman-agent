@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { branding } from "../src/lib/api.js";
+import { branding } from "../src/lib/branding.js";
 
 describe("admin console branding", () => {
   it("uses the centralized product identity (renamable in one place)", () => {

@@ -1,42 +1,35 @@
 import "server-only";
+import { DevIdentityError, identityHeaders } from "./session.js";
 
 /**
  * The person's workspace client — server-side only.
  *
- * Identity headers never reach the browser: every read is a server component
- * and every mutation is a server action, so the browser only ever sees
- * rendered HTML and the results of actions it triggered. In dev the identity
- * comes from environment (see identity()); real auth replaces that function
- * and nothing else.
+ * Identity never reaches the browser: every read is a server component and
+ * every mutation is a server action, so the browser only ever sees rendered
+ * HTML and the results of actions it triggered. How the person is identified
+ * (a WorkOS bearer, or dev headers) is session.ts's business.
  */
 
 const API_BASE = process.env["MAMAN_API_BASE_URL"] ?? "http://localhost:4000";
-
-/**
- * Who is using this page. DEV ONLY: the API refuses these headers outside
- * AUTH_MODE=dev, and refuses AUTH_MODE=dev in production. Real auth supplies a
- * bearer token here instead; the shape of everything else is unchanged.
- */
-function identity(): Record<string, string> {
-  const org = process.env["MAMAN_DEV_ORG_ID"];
-  const user = process.env["MAMAN_DEV_USER_ID"];
-  if (!org || !user) {
-    throw new Error(
-      "MAMAN_DEV_ORG_ID and MAMAN_DEV_USER_ID must be set (dev auth). Real auth is Phase 1.",
-    );
-  }
-  return { "x-dev-org-id": org, "x-dev-user-id": user, "x-dev-role": "member" };
-}
 
 async function call<T>(
   method: "GET" | "POST",
   path: string,
   body?: unknown,
 ): Promise<{ ok: true; data: T } | { ok: false; status: number; detail?: string }> {
+  let identity: Record<string, string>;
+  try {
+    identity = await identityHeaders();
+  } catch (e) {
+    // Only the dev fallback fails softly. A missing WorkOS session is a
+    // redirect to sign-in, thrown by Next, and must propagate.
+    if (e instanceof DevIdentityError) return { ok: false, status: 503, detail: e.message };
+    throw e;
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
-      ...identity(),
+      ...identity,
       ...(body !== undefined ? { "content-type": "application/json" } : {}),
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
