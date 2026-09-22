@@ -45,3 +45,4 @@ export {
   type DraftMessage,
   type CreateDraftResult,
 } from "./gmail-draft.js";
+export type { DealAnswer, DealSignal, DealSource } from "./deals.js";

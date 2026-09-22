@@ -16,7 +16,7 @@ import {
   type DbClient,
 } from "@maman/db";
 import { envelopeEncrypt, packEnvelope } from "@maman/connector-auth";
-import type { HttpRequest, HttpResponse } from "@maman/connector-adapters";
+import type { DealSource, HttpRequest, HttpResponse } from "@maman/connector-adapters";
 import { createUserVaultCredentialProvider } from "../../src/user-vault-credentials.js";
 import { runGmailSyncJob } from "../../src/sync-gmail.js";
 
@@ -248,5 +248,80 @@ describe("Gmail sync job — the L1 slice on a real database", () => {
     );
     expect(rows[0]!["last_synced_at"]).not.toBeNull();
     expect(rows[0]!["last_error"]).toBeNull();
+  });
+});
+
+describe("with a CRM connected — the deal step", () => {
+  const asked: string[][] = [];
+  const crm = (behaviour: "answer" | "down"): DealSource => ({
+    provider: "fake_crm",
+    async lookup(_ctx, addresses) {
+      asked.push([...addresses]);
+      if (behaviour === "down") throw new Error("CRM 503");
+      return {
+        asked: addresses,
+        signals: [
+          {
+            address: "bob@client.com",
+            has_open_deal: true,
+            open_deal_value: 40_000,
+            account_name: "Client Co",
+          },
+          // Not one of Alice's contacts: must be ignored, never create a row.
+          { address: "mallory@evil.example", has_open_deal: true, open_deal_value: 1 },
+        ],
+      };
+    },
+  });
+  const ctx = { organizationId: orgId, userId: alice };
+
+  it("asks about exactly this person's contacts and ranks the confirmed deal higher", async () => {
+    const result = await runGmailSyncJob({ ...deps(), deals: crm("answer") }, ctx);
+    expect(result.ok && result.deals).toEqual({
+      ok: true,
+      provider: "fake_crm",
+      asked: 3,
+      open: 1,
+      closed: 0,
+      unknown: 2,
+    });
+    expect(asked.at(-1)).toEqual(["bob@client.com", "dan@client.com", "sarah@acme.com"]);
+
+    const list = await listPendingObligations(client.sql, ctx);
+    // Sarah (unknown to the CRM) is still there — unknown is not closed.
+    expect(list.map((o) => o.subject)).toEqual(["Enterprise pricing", "Proposal"]);
+    const proposal = list.find((o) => o.subject === "Proposal")!;
+    expect(proposal.reason).toMatchObject({ has_open_deal: true, open_deal_value: 40_000 });
+    expect(proposal.contact_account_name).toBe("Client Co");
+    // The stranger the CRM mentioned did not become a contact.
+    const rows = await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`SELECT count(*)::int AS n FROM contacts`,
+    );
+    expect(rows[0]!["n"]).toBe(3);
+  });
+
+  it("a CRM that is down does not take the mailbox down: the sync completes on the last known state", async () => {
+    const result = await runGmailSyncJob({ ...deps(), deals: crm("down") }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.deals).toEqual({
+      ok: false,
+      provider: "fake_crm",
+      error: "CRM 503",
+    });
+    const proposal = (await listPendingObligations(client.sql, ctx)).find(
+      (o) => o.subject === "Proposal",
+    )!;
+    expect(proposal.reason).toMatchObject({ has_open_deal: true, open_deal_value: 40_000 });
+  });
+
+  it("without a CRM the step says so and nothing is rewritten", async () => {
+    const result = await runGmailSyncJob(deps(), ctx);
+    expect(result.ok && result.deals).toEqual({ ok: false, provider: null, reason: "no_crm" });
+    const proposal = (await listPendingObligations(client.sql, ctx)).find(
+      (o) => o.subject === "Proposal",
+    )!;
+    expect(proposal.reason).toMatchObject({ has_open_deal: true, open_deal_value: 40_000 });
   });
 });

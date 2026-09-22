@@ -46,4 +46,8 @@ export {
   type ObligationOutcome,
   getObligationForDraft,
   type ObligationForDraft,
+  applyDealAnswer,
+  listContactAddresses,
+  type DealApplyResult,
+  type DealSignalRow,
 } from "./workspace.js";

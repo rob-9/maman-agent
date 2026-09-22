@@ -3,6 +3,8 @@ import { uuidv7 } from "@maman/contracts";
 import { addMembership, globalCreateOrganization, globalCreateUser } from "../../src/index.js";
 import { withUser } from "../../src/tenant.js";
 import {
+  applyDealAnswer,
+  listContactAddresses,
   listPendingObligations,
   loadDetectionInputs,
   replacePendingObligations,
@@ -207,5 +209,154 @@ describe("workspace repository", () => {
     expect(
       await listPendingObligations(db.client.sql, { organizationId: orgId, userId: other }),
     ).toEqual([]);
+  });
+});
+
+describe("deal state from a CRM", () => {
+  const stateOf = async (address: string, who = ctx) => {
+    const c = (await loadDetectionInputs(db.client.sql, who)).contacts;
+    const rows = await withUser(
+      db.client.sql,
+      who,
+      (tx) => tx`SELECT id FROM contacts WHERE external_id = ${address}`,
+    );
+    const found = c.find((x) => x.contact_id === rows[0]?.["id"]);
+    return found
+      ? {
+          has_open_deal: found.has_open_deal,
+          open_deal_value: found.open_deal_value,
+          account_name: found.account_name,
+        }
+      : undefined;
+  };
+
+  it("lists this person's contact addresses, sorted, as the question for a CRM", async () => {
+    await upsertSyncedThreads(db.client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        T({ external_id: "gm-ann", contact: { address: "ann@acme.com" } }),
+        T({ external_id: "gm-zed", contact: { address: "zed@nowhere.com" } }),
+      ],
+    });
+    const addresses = await listContactAddresses(db.client.sql, ctx);
+    expect(addresses).toEqual([...addresses].sort());
+    expect(addresses).toEqual(
+      expect.arrayContaining(["ann@acme.com", "bob@client.com", "zed@nowhere.com"]),
+    );
+  });
+
+  it("writes open, closed, and — for the asked-but-unmentioned — UNKNOWN, never closed", async () => {
+    const result = await applyDealAnswer(db.client.sql, ctx, {
+      asked: ["ann@acme.com", "bob@client.com", "zed@nowhere.com", "ghost@none.com"],
+      signals: [
+        {
+          address: "ann@acme.com",
+          has_open_deal: true,
+          open_deal_value: 48_000,
+          account_name: "Acme",
+        },
+        { address: "bob@client.com", has_open_deal: false },
+      ],
+    });
+    expect(result).toEqual({ open: 1, closed: 1, unknown: 1, untouched: 1 });
+    expect(await stateOf("ann@acme.com")).toEqual({
+      has_open_deal: true,
+      open_deal_value: 48_000,
+      account_name: "Acme",
+    });
+    expect(await stateOf("bob@client.com")).toMatchObject({ has_open_deal: false });
+    // zed is not in the CRM. That is not a closed relationship.
+    expect(await stateOf("zed@nowhere.com")).toMatchObject({ has_open_deal: null });
+  });
+
+  it("leaves an address that was not asked alone, and ignores a signal for one", async () => {
+    await upsertSyncedThreads(db.client.sql, ctx, {
+      connection_id: connId,
+      threads: [T({ external_id: "gm-quiet", contact: { address: "quiet@x.com" } })],
+    });
+    await applyDealAnswer(db.client.sql, ctx, {
+      asked: ["ann@acme.com"],
+      signals: [
+        { address: "ann@acme.com", has_open_deal: true, open_deal_value: 10_000 },
+        { address: "quiet@x.com", has_open_deal: true, open_deal_value: 1 },
+      ],
+    });
+    expect(await stateOf("quiet@x.com")).toMatchObject({ has_open_deal: null });
+    // The value is one observation with "open": replaced, not merged.
+    expect(await stateOf("ann@acme.com")).toMatchObject({
+      has_open_deal: true,
+      open_deal_value: 10_000,
+    });
+  });
+
+  it("an account name fills a blank and never overwrites; a deal that disappears goes back to unknown", async () => {
+    await applyDealAnswer(db.client.sql, ctx, {
+      asked: ["ann@acme.com", "zed@nowhere.com"],
+      signals: [
+        {
+          address: "ann@acme.com",
+          has_open_deal: true,
+          open_deal_value: 10_000,
+          account_name: "Other",
+        },
+        {
+          address: "zed@nowhere.com",
+          has_open_deal: true,
+          open_deal_value: 5,
+          account_name: "Zed Co",
+        },
+      ],
+    });
+    expect(await stateOf("ann@acme.com")).toMatchObject({ account_name: "Acme" });
+    expect(await stateOf("zed@nowhere.com")).toMatchObject({
+      account_name: "Zed Co",
+      open_deal_value: 5,
+    });
+    await applyDealAnswer(db.client.sql, ctx, { asked: ["ann@acme.com"], signals: [] });
+    expect(await stateOf("ann@acme.com")).toMatchObject({
+      has_open_deal: null,
+      open_deal_value: undefined,
+      account_name: "Acme",
+    });
+  });
+
+  it("a colleague's contact with the same address is not touched", async () => {
+    const other = uuidv7();
+    const otherConn = uuidv7();
+    const theirs = { organizationId: orgId, userId: other };
+    await globalCreateUser(db.client.sql, {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "peer@co.example",
+      display_name: "Peer",
+    });
+    await addMembership(
+      db.client.sql,
+      { organizationId: orgId },
+      { user_id: other, role: "member" },
+    );
+    await withUser(db.client.sql, theirs, async (tx) => {
+      await tx`
+        INSERT INTO user_connections
+          (id, organization_id, owner_user_id, provider, external_account_label,
+           encrypted_credentials, scopes, status)
+        VALUES (${otherConn}, ${orgId}, ${other}, 'gmail', 'peer@gmail',
+                ${Buffer.from("ct")}, ARRAY['read'], 'active')
+      `;
+    });
+    await upsertSyncedThreads(db.client.sql, theirs, {
+      connection_id: otherConn,
+      threads: [T({ external_id: "gm-peer", contact: { address: "ann@acme.com" } })],
+    });
+    await applyDealAnswer(db.client.sql, ctx, {
+      asked: ["ann@acme.com"],
+      signals: [{ address: "ann@acme.com", has_open_deal: true, open_deal_value: 99 }],
+    });
+    expect(await stateOf("ann@acme.com")).toMatchObject({
+      has_open_deal: true,
+      open_deal_value: 99,
+    });
+    expect(await stateOf("ann@acme.com", theirs)).toMatchObject({ has_open_deal: null });
+    expect(await listContactAddresses(db.client.sql, theirs)).toEqual(["ann@acme.com"]);
   });
 });

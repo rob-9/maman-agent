@@ -169,6 +169,76 @@ export async function loadDetectionInputs(sql: Sql, ctx: UserContext): Promise<D
   });
 }
 
+/** This person's contact addresses — the question to put to a CRM. */
+export async function listContactAddresses(sql: Sql, ctx: UserContext): Promise<string[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({ external_id: schema.contacts.external_id })
+      .from(schema.contacts)
+      .orderBy(schema.contacts.external_id);
+    return rows.map((r) => r.external_id);
+  });
+}
+
+/** What a CRM said about a contact. Mirrors DealSignal, structurally. */
+export type DealSignalRow = {
+  address: string;
+  has_open_deal: boolean;
+  open_deal_value?: number | undefined;
+  account_name?: string | undefined;
+};
+
+export type DealApplyResult = { open: number; closed: number; unknown: number; untouched: number };
+
+/**
+ * Writes a CRM's answer onto this person's contacts.
+ *
+ * Every address ASKED is rewritten from the answer: the ones the CRM returned
+ * as it returned them, and the rest back to UNKNOWN (null) — the CRM was
+ * consulted and had nothing to say, which is not "closed" (see DealSignal).
+ * That also means a deal the CRM stops reporting stops promoting. Addresses
+ * NOT asked are left alone. An account name from the CRM fills a blank but
+ * never overwrites one already held; the value is replaced wholesale, since
+ * "open" and "how much" are one observation.
+ */
+export async function applyDealAnswer(
+  sql: Sql,
+  ctx: UserContext,
+  answer: { asked: readonly string[]; signals: readonly DealSignalRow[] },
+): Promise<DealApplyResult> {
+  return withUser(sql, ctx, async (tx) => {
+    const d = db(tx);
+    const byAddress = new Map(answer.signals.map((s) => [s.address, s]));
+    const result: DealApplyResult = { open: 0, closed: 0, unknown: 0, untouched: 0 };
+    for (const address of new Set(answer.asked)) {
+      const signal = byAddress.get(address);
+      const state = signal ? signal.has_open_deal : null;
+      const updated = await d
+        .update(schema.contacts)
+        .set({
+          has_open_deal: state,
+          open_deal_value:
+            state === true && signal?.open_deal_value !== undefined
+              ? String(signal.open_deal_value)
+              : null,
+          ...(signal?.account_name
+            ? {
+                account_name: rawSql`COALESCE(${schema.contacts.account_name}, ${signal.account_name})`,
+              }
+            : {}),
+          updated_at: rawSql`now()`,
+        })
+        .where(eq(schema.contacts.external_id, address))
+        .returning({ id: schema.contacts.id });
+      if (updated.length === 0) result.untouched += 1;
+      else if (state === true) result.open += 1;
+      else if (state === false) result.closed += 1;
+      else result.unknown += 1;
+    }
+    return result;
+  });
+}
+
 /** An obligation as the engine emits it. Mirrors `Obligation`, structurally. */
 export type DetectedObligation = {
   thread_id: string;

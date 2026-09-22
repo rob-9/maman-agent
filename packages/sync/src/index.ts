@@ -5,7 +5,12 @@
  * package and not a file in either app: apps may not import apps.
  */
 export { createUserVaultCredentialProvider, type UserVaultDeps } from "./user-vault-credentials.js";
-export { runGmailSyncJob, type GmailSyncJobDeps, type GmailSyncJobResult } from "./sync-gmail.js";
+export {
+  runGmailSyncJob,
+  type DealStepResult,
+  type GmailSyncJobDeps,
+  type GmailSyncJobResult,
+} from "./sync-gmail.js";
 export { createSweepActivities, listSweepTargets } from "./sweep.js";
 export type {
   SweepActivities,

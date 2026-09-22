@@ -1,11 +1,14 @@
 import type { Sql } from "postgres";
 import {
   syncGmailThreads,
+  type DealSource,
   type HttpTransport,
   type UserCredentialProvider,
 } from "@maman/connector-adapters";
 import {
+  applyDealAnswer,
   getUserConnection,
+  listContactAddresses,
   loadDetectionInputs,
   markUserConnectionSync,
   replacePendingObligations,
@@ -32,7 +35,19 @@ export type GmailSyncJobDeps = {
   credentials: UserCredentialProvider;
   transport: HttpTransport;
   now: () => Date;
+  /**
+   * The organization's CRM, when one is connected. Absent → deal state stays
+   * unknown and the list still works (0009). Present → asked about THIS
+   * person's contacts only, between the mailbox write and detection, so the
+   * ranking that lands is the one the CRM informed.
+   */
+  deals?: DealSource | undefined;
 };
+
+export type DealStepResult =
+  | { ok: true; provider: string; asked: number; open: number; closed: number; unknown: number }
+  | { ok: false; provider: string; error: string }
+  | { ok: false; provider: null; reason: "no_crm" };
 
 export type GmailSyncJobResult =
   | {
@@ -44,6 +59,7 @@ export type GmailSyncJobResult =
       threads_upserted: number;
       obligations_written: number;
       obligations_kept_decided: number;
+      deals: DealStepResult;
     }
   | { ok: false; reason: "no_connection" | "sync_failed"; error?: string };
 
@@ -85,6 +101,11 @@ export async function runGmailSyncJob(
     threads: synced.threads,
   });
 
+  // The CRM's answer, if there is a CRM. A CRM that is down must not take the
+  // mailbox down with it: the sync completes on whatever deal state the
+  // contacts already hold, and the result says the CRM was not heard.
+  const deals = await dealStep(deps, ctx);
+
   const inputs = await loadDetectionInputs(deps.sql, ctx);
   const now = deps.now();
   const detected = detectObligations({
@@ -106,5 +127,38 @@ export async function runGmailSyncJob(
     threads_upserted: upserted.threads,
     obligations_written: replaced.written,
     obligations_kept_decided: replaced.kept_decided,
+    deals,
+  };
+}
+
+async function dealStep(deps: GmailSyncJobDeps, ctx: UserContext): Promise<DealStepResult> {
+  if (!deps.deals) return { ok: false, provider: null, reason: "no_crm" };
+  const provider = deps.deals.provider;
+  const addresses = await listContactAddresses(deps.sql, ctx);
+  if (addresses.length === 0) {
+    return { ok: true, provider, asked: 0, open: 0, closed: 0, unknown: 0 };
+  }
+  let answer;
+  try {
+    answer = await deps.deals.lookup(
+      { organization_id: ctx.organizationId, user_id: ctx.userId },
+      addresses,
+    );
+  } catch (e) {
+    return { ok: false, provider, error: e instanceof Error ? e.message : String(e) };
+  }
+  // Only what we asked may be written. A CRM cannot introduce a contact.
+  const askedSet = new Set(addresses);
+  const applied = await applyDealAnswer(deps.sql, ctx, {
+    asked: addresses,
+    signals: answer.signals.filter((s) => askedSet.has(s.address)),
+  });
+  return {
+    ok: true,
+    provider,
+    asked: addresses.length,
+    open: applied.open,
+    closed: applied.closed,
+    unknown: applied.unknown,
   };
 }
