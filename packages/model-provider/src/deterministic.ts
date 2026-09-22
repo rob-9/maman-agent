@@ -15,6 +15,13 @@ import {
   type AssessmentInput,
   type AssessmentOutput,
 } from "./assessment.js";
+import {
+  composeDeterministically,
+  draftInputSchema,
+  draftOutputSchema,
+  type DraftInput,
+  type DraftOutput,
+} from "./draft.js";
 
 /**
  * DemoModelProvider: fully deterministic, zero-credential implementation that
@@ -95,6 +102,19 @@ export class DeterministicModelProvider implements ModelProvider {
       return { ok: false, error: "policy_violation", detail: "invalid assessment input" };
     }
     const validated = assessmentOutputSchema.safeParse(assessDeterministically(parsed.data));
+    if (!validated.success) return { ok: false, error: "invalid_output" };
+    return {
+      ok: true,
+      value: validated.data,
+      usage: { input_tokens: 0, output_tokens: 0, model_alias: "demo" },
+    };
+  }
+  async composeDraft(input: DraftInput): Promise<ModelResult<DraftOutput>> {
+    const parsed = draftInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "policy_violation", detail: "invalid draft input" };
+    }
+    const validated = draftOutputSchema.safeParse(composeDeterministically(parsed.data));
     if (!validated.success) return { ok: false, error: "invalid_output" };
     return {
       ok: true,

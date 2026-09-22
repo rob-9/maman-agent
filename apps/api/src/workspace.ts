@@ -25,19 +25,30 @@ import {
 import {
   createUserConnection,
   getObligationForDraft,
+  globalGetUserById,
   listPendingObligations,
   listUserConnections,
+  recordDraft,
   setObligationOutcome,
   type UserContext,
 } from "@maman/db";
 import {
   createOrgVaultCredentialProvider,
   createUserVaultCredentialProvider,
+  encryptBody,
+  meetingContext,
   resolveDealSource,
   runGmailSyncJob,
+  storedThreadContent,
+  voiceFor,
 } from "@maman/sync";
 import { createModelProvider } from "@maman/model-provider";
-import { deterministicComposer, type DraftComposer } from "@maman/voice-engine";
+import {
+  deterministicContextComposer,
+  modelComposer,
+  type ContextComposer,
+} from "@maman/voice-engine";
+import { DeterministicModelProvider } from "@maman/model-provider";
 import { requirePrincipal } from "./auth.js";
 import { authorize } from "./authorization.js";
 import { landing } from "./connectors.js";
@@ -76,8 +87,8 @@ export type WorkspaceRouteDeps = {
   /** CRM API transport for the deal step (tests inject a scripted Salesforce). */
   crmTransport?: HttpTransport;
   now?: () => Date;
-  /** Draft composer; the deterministic one until a model earns its place. */
-  composer?: DraftComposer;
+  /** Draft composer override (tests). Default: model when the agent is on, template otherwise. */
+  composer?: ContextComposer;
 };
 
 export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRouteDeps): void {
@@ -89,9 +100,15 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
   const tokenTransport = deps.tokenTransport ?? createConnectorTokenTransport();
   const gmailTransport = deps.gmailTransport ?? fetchTransport;
   const crmTransport = deps.crmTransport ?? fetchTransport;
-  const composer = deps.composer ?? deterministicComposer;
   const agentOn = env.AGENT_MODE === "assist";
   const modelProvider = createModelProvider(env);
+  // The template composer is the deterministic provider's draft: grounded by
+  // construction. With the agent on, the model writes and the template is
+  // the fallback; off, the template is the composer. Same interface.
+  const template = deterministicContextComposer(new DeterministicModelProvider());
+  const composer =
+    deps.composer ??
+    (agentOn ? modelComposer({ provider: modelProvider, fallback: template }) : template);
 
   const clientFor = (provider: string) =>
     provider === "gmail" && env.GOOGLE_CLIENT_ID
@@ -352,6 +369,31 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     if (!target) return reply.status(404).send({ status: 404, title: "Not Found" });
 
     const reason = target.reason as { days_elapsed?: number };
+    const credentials = createUserVaultCredentialProvider({
+      sql,
+      masterKey: master,
+      transport: tokenTransport,
+      clientCredentials: clientFor,
+    });
+    // The conversation, from the store; Gmail only if the store has nothing.
+    const content =
+      (await storedThreadContent({ sql, contentKey: master }, ctx, target.thread.id)) ??
+      (await gmailContentReader({ credentials, transport: gmailTransport }).read(
+        { organization_id: ctx.organizationId, user_id: ctx.userId },
+        target.thread.external_id,
+        [],
+      ));
+    if (content.messages.length === 0) {
+      return reply.status(409).send({ status: 409, reason: "no_thread_content" });
+    }
+    const sender = await globalGetUserById(sql, ctx.userId);
+    const voice = await voiceFor({ sql, contentKey: master }, ctx, target.contact.id);
+    const meetings = await meetingContext(
+      { sql, contentKey: master },
+      ctx,
+      target.contact.external_id,
+      now(),
+    );
     const draft = await composer.compose({
       kind: target.kind,
       contact_display_name: target.contact.display_name,
@@ -359,22 +401,23 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
       account_name: target.contact.account_name,
       subject: target.thread.subject,
       days_elapsed: reason.days_elapsed ?? 0,
-      // Until real auth carries a display name, the sender signs by address.
-      sender_name: principal.user_id,
+      has_open_deal: target.facts.has_open_deal,
+      ...(target.facts.open_deal_value !== null
+        ? { open_deal_value: target.facts.open_deal_value }
+        : {}),
+      ...(target.facts.last_meeting_at ? { last_meeting_at: target.facts.last_meeting_at } : {}),
+      ...meetings,
+      sender_name: sender?.display_name ?? sender?.email ?? "me",
+      sender_address: sender?.email ?? "",
+      messages: content.messages.slice(-8),
+      ...(target.assessment?.ask ? { ask: target.assessment.ask } : {}),
+      voice,
     });
 
     // A DRAFT. It lands in the person's Drafts folder and nothing happens until
     // they open it and press Send. The scope cannot send; neither can this.
     const created = await createGmailDraft(
-      {
-        credentials: createUserVaultCredentialProvider({
-          sql,
-          masterKey: master,
-          transport: tokenTransport,
-          clientCredentials: clientFor,
-        }),
-        transport: gmailTransport,
-      },
+      { credentials, transport: gmailTransport },
       { organization_id: ctx.organizationId, user_id: ctx.userId },
       {
         to: draft.to,
@@ -388,12 +431,25 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     // pending and the person sees it again, rather than a "drafted" that
     // points at nothing.
     await setObligationOutcome(sql, ctx, id, "drafted");
+    // Recorded so the next sync can match it to what was actually sent.
+    await recordDraft(sql, ctx, {
+      obligation_id: id,
+      thread_id: target.thread.id,
+      gmail_draft_id: created.draft_id,
+      subject: draft.subject,
+      body_ciphertext: encryptBody(draft.body, master, ctx),
+      body_chars: draft.body.length,
+      composer: draft.composer,
+      model_alias: draft.model_alias,
+      fallback_reason: draft.fallback_reason,
+    });
     return {
       obligation_id: id,
       draft_id: created.draft_id,
       to: draft.to,
       subject: draft.subject,
       composer: draft.composer,
+      ...(draft.fallback_reason ? { fallback_reason: draft.fallback_reason } : {}),
     };
   });
 }

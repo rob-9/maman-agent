@@ -1,6 +1,7 @@
 import { looksLikeSecret } from "@maman/contracts";
 import { z } from "zod";
 import type { AssessmentInput, AssessmentOutput } from "./assessment.js";
+import type { DraftInput, DraftOutput } from "./draft.js";
 
 /**
  * ModelProvider interface. LLM output is UNTRUSTED DATA everywhere:
@@ -116,6 +117,13 @@ export interface ModelProvider {
    * find, and every field is bounded by assessmentOutputSchema.
    */
   assessObligation(input: AssessmentInput): Promise<ModelResult<AssessmentOutput>>;
+  /**
+   * The draft, in the person's voice, answering the thread. Style from their
+   * own writing; facts only from the thread. The caller grounds the result
+   * (groundDraft) and falls back if it fails; the model is never the last
+   * word on what is claimed.
+   */
+  composeDraft(input: DraftInput): Promise<ModelResult<DraftOutput>>;
 }
 
 /** Rejects any capability id that was not offered in the prompt. */

@@ -66,7 +66,7 @@ describe("the banner after an OAuth round-trip", () => {
   it("reads the landing URL the API sends the browser to", () => {
     expect(noticeFrom({ provider: "gmail", connected: "1" })).toEqual({
       tone: "ok",
-      text: "Gmail connected.",
+      text: "Google connected.",
     });
     expect(noticeFrom({ provider: "salesforce", error: "exchange_failed" })).toEqual({
       tone: "bad",

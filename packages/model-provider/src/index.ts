@@ -17,10 +17,25 @@ export {
   assessmentMessageSchema,
   assessmentOutputSchema,
   lastQuestion,
+  meetingRefSchema,
+  weekday,
   type AssessmentInput,
+  type MeetingRef,
   type AssessmentMessage,
   type AssessmentOutput,
 } from "./assessment.js";
+export {
+  composeDeterministically,
+  draftInputSchema,
+  draftOutputSchema,
+  firstName,
+  groundDraft,
+  signOffFrom,
+  type DraftInput,
+  type DraftOutput,
+  type GroundingResult,
+  type GroundingSources,
+} from "./draft.js";
 export { DemoModelProvider } from "./demo.js";
 export { AnthropicModelProvider, type AnthropicProviderConfig } from "./anthropic.js";
 export {

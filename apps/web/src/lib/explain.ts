@@ -16,6 +16,10 @@ export type ObligationView = {
   subject: string;
   contact_display_name: string;
   contact_account_name: string | null;
+  last_meeting_at: string | null;
+  last_meeting_title: string | null;
+  next_meeting_at: string | null;
+  next_meeting_title: string | null;
   /** The agent's judgment, when it has read this thread in its current state. */
   assessment: {
     owed: boolean;
@@ -66,7 +70,9 @@ function factsOf(
     case "unsent_followup":
       return {
         headline: `No follow-up after meeting ${who}`,
-        detail: `You met ${days} ago and nothing has gone out since.`,
+        detail: o.last_meeting_title
+          ? `You met ${days} ago for "${o.last_meeting_title}" and nothing has gone out since.`
+          : `You met ${days} ago and nothing has gone out since.`,
       };
     case "awaiting_them":
       return {
@@ -74,4 +80,11 @@ function factsOf(
         detail: `You wrote ${days} ago on "${o.subject}" with no reply.`,
       };
   }
+}
+
+/** "Meeting Thursday: Pricing review", for the card's fact line. */
+export function nextMeetingLine(o: ObligationView, now: Date = new Date()): string | null {
+  if (!o.next_meeting_at || Date.parse(o.next_meeting_at) < now.getTime()) return null;
+  const day = new Date(o.next_meeting_at).toLocaleDateString("en-US", { weekday: "long" });
+  return o.next_meeting_title ? `Meeting ${day}: ${o.next_meeting_title}` : `Meeting ${day}`;
 }

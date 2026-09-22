@@ -32,3 +32,6 @@ export {
   toSyncedMessage,
   voiceExemplars,
 } from "./content.js";
+export { editDistance, matchSentDrafts, similarity, voiceFor, type Voice } from "./voice.js";
+export { runCalendarStep, toSyncedMeeting, type CalendarStepResult } from "./sync-calendar.js";
+export { meetingContext, type MeetingContext } from "./meetings.js";

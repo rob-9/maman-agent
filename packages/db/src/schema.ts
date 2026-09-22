@@ -395,6 +395,8 @@ export const user_connections = pgTable("user_connections", {
   status: text("status", { enum: ["active", "expired", "revoked", "error"] }).notNull(),
   last_synced_at: utc("last_synced_at"),
   last_error: text("last_error"),
+  /** Google Calendar's incremental sync token. See migration 0013. */
+  calendar_sync_token: text("calendar_sync_token"),
   created_at: utc("created_at").notNull().defaultNow(),
   updated_at: utc("updated_at").notNull().defaultNow(),
 });
@@ -411,6 +413,32 @@ export const contacts = pgTable("contacts", {
   has_open_deal: boolean("has_open_deal"),
   open_deal_value: numeric("open_deal_value", { precision: 14, scale: 2 }),
   last_meeting_at: utc("last_meeting_at"),
+  last_meeting_title: text("last_meeting_title"),
+  next_meeting_at: utc("next_meeting_at"),
+  next_meeting_title: text("next_meeting_title"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+/** Meetings, per person; the description encrypted to them. See migration 0013. */
+export const meetings = pgTable("meetings", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  connection_id: uuid("connection_id").notNull(),
+  external_id: text("external_id").notNull(),
+  title: text("title").notNull(),
+  description_ciphertext: bytea("description_ciphertext"),
+  description_chars: integer("description_chars").notNull().default(0),
+  starts_at: utc("starts_at").notNull(),
+  ends_at: utc("ends_at").notNull(),
+  all_day: boolean("all_day").notNull().default(false),
+  organizer_address: text("organizer_address"),
+  attendees: jsonb("attendees").notNull(),
+  self_response: text("self_response", {
+    enum: ["accepted", "tentative", "declined", "needsAction"],
+  }).notNull(),
+  status: text("status", { enum: ["confirmed", "tentative", "cancelled"] }).notNull(),
   created_at: utc("created_at").notNull().defaultNow(),
   updated_at: utc("updated_at").notNull().defaultNow(),
 });
@@ -447,6 +475,27 @@ export const messages = pgTable("messages", {
   body_chars: integer("body_chars").notNull(),
   created_at: utc("created_at").notNull().defaultNow(),
   updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+/** What the agent wrote, matched later to what was sent. See migration 0012. */
+export const drafts = pgTable("drafts", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  obligation_id: uuid("obligation_id"),
+  thread_id: uuid("thread_id").notNull(),
+  gmail_draft_id: text("gmail_draft_id").notNull(),
+  subject: text("subject").notNull(),
+  body_ciphertext: bytea("body_ciphertext").notNull(),
+  body_chars: integer("body_chars").notNull(),
+  composer: text("composer", { enum: ["deterministic", "model"] }).notNull(),
+  model_alias: text("model_alias"),
+  fallback_reason: text("fallback_reason"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  sent_external_id: text("sent_external_id"),
+  sent_at: utc("sent_at"),
+  edit_ratio: numeric("edit_ratio", { precision: 4, scale: 3 }),
+  matched_at: utc("matched_at"),
 });
 
 /** The agent's judgment about a thread. See migration 0010. */

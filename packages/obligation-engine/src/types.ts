@@ -73,6 +73,8 @@ export const contactSchema = z
     has_open_deal: z.boolean().nullable(),
     /** Last meeting, from the calendar connector. */
     last_meeting_at: z.string().datetime().optional(),
+    /** Next meeting already on the calendar. A chase is not owed when one is booked. */
+    next_meeting_at: z.string().datetime().optional(),
   })
   .strict();
 export type Contact = z.infer<typeof contactSchema>;
@@ -93,6 +95,8 @@ export const obligationReasonSchema = z
     message_count: z.number().int().positive(),
     has_open_deal: z.boolean().nullable(),
     open_deal_value: z.number().nonnegative().optional(),
+    /** The meeting an unsent follow-up is counted from. */
+    last_meeting_at: z.string().datetime().optional(),
   })
   .strict();
 export type ObligationReason = z.infer<typeof obligationReasonSchema>;

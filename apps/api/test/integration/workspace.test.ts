@@ -134,6 +134,9 @@ let draftStatus = 200;
 const gmailTransport = async (req: HttpRequest): Promise<HttpResponse> => {
   gmailRequests.push(req);
   const url = new URL(req.url);
+  if (url.pathname.includes("/calendar/")) {
+    return { status: 200, headers: {}, body: { items: [], nextSyncToken: "cal-1" } };
+  }
   if (req.method === "POST" && url.pathname.endsWith("/drafts")) {
     return draftStatus === 200
       ? { status: 200, headers: {}, body: { id: "draft-1", message: { id: "msg-1" } } }
@@ -335,6 +338,8 @@ describe("/v1/me — the demo path", () => {
     const res = await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: true, listed: 2, obligations_written: 2 });
+    // The same Google grant covers the calendar; the step ran on this sync.
+    expect(res.json().calendar).toMatchObject({ ok: true });
     // The scripted Gmail saw the LIVE token from the vault — proof the
     // callback → vault → sync chain is one chain.
     expect(gmailRequests.some((r) => r.headers["authorization"] === "Bearer live-token")).toBe(
@@ -636,13 +641,54 @@ describe("AGENT_MODE=assist — the agent pass over HTTP", () => {
     });
   });
 
+  it("drafts from the stored thread and the person's voice; grounded, recorded, never sent", async () => {
+    gmailRequests.length = 0;
+    const list = await agentApp.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: as(alice),
+    });
+    const pricing = (list.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["subject"] === "Enterprise pricing",
+    )!;
+    const res = await agentApp.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${pricing["id"]}/draft`,
+      headers: as(alice),
+    });
+    expect(res.statusCode).toBe(200);
+    // With the agent on, the configured provider writes (here the demo one,
+    // whose draft is grounded by construction), so no fallback was needed.
+    expect(res.json()).toMatchObject({ composer: "model", to: "sarah@acme.com" });
+    expect(res.json().fallback_reason).toBeUndefined();
+    const posted = gmailRequests.find((r) => r.method === "POST")!;
+    expect(posted.url.endsWith("/drafts")).toBe(true);
+    expect(gmailRequests.filter((r) => r.method === "POST")).toHaveLength(1);
+    const raw = JSON.parse(posted.body!) as { message: { raw: string } };
+    const mime = Buffer.from(raw.message.raw, "base64url").toString("utf8");
+    // The draft answers the actual ask from the thread, in the sender's name.
+    expect(mime).toContain("Can you confirm pricing for 60 seats?");
+    expect(mime).toContain("alice@co.example");
+    // Recorded, encrypted, unmatched until she sends it.
+    const drafts = await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) =>
+        tx`SELECT composer, matched_at, body_ciphertext::text AS b FROM drafts ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(drafts[0]!["composer"]).toBe("model");
+    expect(drafts[0]!["matched_at"]).toBeNull();
+    expect(String(drafts[0]!["b"])).not.toContain("60 seats");
+  });
+
   it("the same data, with the agent off, is the deterministic list and says so", async () => {
     const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
     expect(list.json().agent_mode).toBe("off");
-    // The judgment rides along for display but decides nothing here.
+    // The judgment rides along for display but decides nothing here. (The
+    // pricing thread was drafted in the previous test, so it is no longer pending.)
     const subjects = (list.json().obligations as Array<Record<string, unknown>>).map(
       (o) => o["subject"],
     );
-    expect(subjects).toContain("Enterprise pricing");
+    expect(subjects).toContain("Proposal");
   });
 });

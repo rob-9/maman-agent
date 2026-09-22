@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { explain, me } from "@/lib/me";
+import { explain, me, nextMeetingLine } from "@/lib/me";
 import { dismissAction, draftAction, snoozeAction, syncAction } from "@/lib/actions";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +35,7 @@ export default async function InboxPage() {
           every card. Nothing to set up.
         </p>
         <Link className="button" href="/connections">
-          Connect Gmail
+          Connect Google
         </Link>
       </div>
     );
@@ -87,6 +87,7 @@ export default async function InboxPage() {
                   {o.reason.open_deal_value !== undefined
                     ? ` · $${o.reason.open_deal_value.toLocaleString()} open`
                     : ""}
+                  {nextMeetingLine(o) ? ` · ${nextMeetingLine(o)}` : ""}
                 </p>
               </div>
               <div className="item-actions">

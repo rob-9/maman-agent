@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql as rawSql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, sql as rawSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import type { Sql, TransactionSql } from "postgres";
 import { uuidv7 } from "@maman/contracts";
@@ -183,6 +183,7 @@ export type DetectionInputs = {
     open_deal_value?: number;
     has_open_deal: boolean | null;
     last_meeting_at?: string;
+    next_meeting_at?: string;
   }>;
 };
 
@@ -213,6 +214,9 @@ export async function loadDetectionInputs(sql: Sql, ctx: UserContext): Promise<D
         has_open_deal: r.has_open_deal,
         ...(r.last_meeting_at !== null
           ? { last_meeting_at: new Date(r.last_meeting_at).toISOString() }
+          : {}),
+        ...(r.next_meeting_at !== null
+          ? { next_meeting_at: new Date(r.next_meeting_at).toISOString() }
           : {}),
       })),
     };
@@ -335,6 +339,416 @@ export async function listRecentOutboundMessages(
       .orderBy(desc(schema.messages.sent_at))
       .limit(opts.limit ?? 12);
     return rows.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString() }));
+  });
+}
+
+/** The person's own messages to ONE contact, newest first: the closest thing to their voice with this person. */
+export async function listOutboundMessagesForContact(
+  sql: Sql,
+  ctx: UserContext,
+  contactId: string,
+  opts: { limit?: number; min_chars?: number } = {},
+): Promise<StoredMessageRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({
+        external_id: schema.messages.external_id,
+        from_address: schema.messages.from_address,
+        from_display_name: schema.messages.from_display_name,
+        direction: schema.messages.direction,
+        sent_at: schema.messages.sent_at,
+        body_ciphertext: schema.messages.body_ciphertext,
+        body_chars: schema.messages.body_chars,
+      })
+      .from(schema.messages)
+      .innerJoin(schema.threads, eq(schema.threads.id, schema.messages.thread_id))
+      .where(
+        and(
+          eq(schema.threads.contact_id, contactId),
+          eq(schema.messages.direction, "outbound"),
+          gte(schema.messages.body_chars, opts.min_chars ?? 40),
+        ),
+      )
+      .orderBy(desc(schema.messages.sent_at))
+      .limit(opts.limit ?? 3);
+    return rows.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString() }));
+  });
+}
+
+/**
+ * The person's past follow-ups: outbound messages whose immediately
+ * preceding message in the thread was also theirs. That is what a chase
+ * looks like, and it is the situation a follow-up draft is written for.
+ */
+export async function listOutboundFollowUps(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { limit?: number; min_chars?: number } = {},
+): Promise<StoredMessageRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<
+      Array<{
+        external_id: string;
+        from_address: string;
+        from_display_name: string | null;
+        direction: "inbound" | "outbound";
+        sent_at: Date;
+        body_ciphertext: Uint8Array;
+        body_chars: number;
+      }>
+    >`
+      SELECT external_id, from_address, from_display_name, direction, sent_at, body_ciphertext, body_chars
+      FROM (
+        SELECT m.*, LAG(m.direction) OVER (PARTITION BY m.thread_id ORDER BY m.sent_at, m.external_id) AS prev
+        FROM messages m
+      ) x
+      WHERE direction = 'outbound' AND prev = 'outbound' AND body_chars >= ${opts.min_chars ?? 40}
+      ORDER BY sent_at DESC
+      LIMIT ${opts.limit ?? 3}
+    `;
+    return rows.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString() }));
+  });
+}
+
+// ---------- drafts: what the agent wrote, and what was sent ----------
+
+export type DraftRecord = {
+  id: string;
+  obligation_id: string | null;
+  thread_id: string;
+  gmail_draft_id: string;
+  subject: string;
+  body_ciphertext: Uint8Array;
+  body_chars: number;
+  composer: "deterministic" | "model";
+  created_at: string;
+};
+
+export async function recordDraft(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    obligation_id: string;
+    thread_id: string;
+    gmail_draft_id: string;
+    subject: string;
+    body_ciphertext: Uint8Array;
+    body_chars: number;
+    composer: "deterministic" | "model";
+    model_alias?: string | undefined;
+    fallback_reason?: string | undefined;
+  },
+): Promise<{ id: string }> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx)
+      .insert(schema.drafts)
+      .values({
+        id: uuidv7(),
+        organization_id: ctx.organizationId,
+        owner_user_id: ctx.userId,
+        obligation_id: input.obligation_id,
+        thread_id: input.thread_id,
+        gmail_draft_id: input.gmail_draft_id,
+        subject: input.subject,
+        body_ciphertext: input.body_ciphertext,
+        body_chars: input.body_chars,
+        composer: input.composer,
+        model_alias: input.model_alias ?? null,
+        fallback_reason: input.fallback_reason ?? null,
+      })
+      .returning({ id: schema.drafts.id });
+    return { id: row!.id };
+  });
+}
+
+/** Drafts not yet matched to a sent message, oldest first. */
+export async function listUnmatchedDrafts(sql: Sql, ctx: UserContext): Promise<DraftRecord[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({
+        id: schema.drafts.id,
+        obligation_id: schema.drafts.obligation_id,
+        thread_id: schema.drafts.thread_id,
+        gmail_draft_id: schema.drafts.gmail_draft_id,
+        subject: schema.drafts.subject,
+        body_ciphertext: schema.drafts.body_ciphertext,
+        body_chars: schema.drafts.body_chars,
+        composer: schema.drafts.composer,
+        created_at: schema.drafts.created_at,
+      })
+      .from(schema.drafts)
+      .where(isNull(schema.drafts.matched_at))
+      .orderBy(schema.drafts.created_at);
+    return rows.map((r) => ({ ...r, created_at: new Date(r.created_at).toISOString() }));
+  });
+}
+
+export async function matchDraftToSent(
+  sql: Sql,
+  ctx: UserContext,
+  draftId: string,
+  sent: { external_id: string; sent_at: string; edit_ratio: number },
+): Promise<void> {
+  await withUser(sql, ctx, async (tx) => {
+    await db(tx)
+      .update(schema.drafts)
+      .set({
+        sent_external_id: sent.external_id,
+        sent_at: sent.sent_at,
+        edit_ratio: String(Math.max(0, Math.min(1, sent.edit_ratio)).toFixed(3)),
+        matched_at: rawSql`now()`,
+      })
+      .where(eq(schema.drafts.id, draftId));
+  });
+}
+
+/** How the agent's drafts fared, for this person: the product's own measure of its voice. */
+export async function draftOutcomes(
+  sql: Sql,
+  ctx: UserContext,
+): Promise<{
+  drafted: number;
+  sent: number;
+  sent_as_written: number;
+  mean_edit_ratio: number | null;
+}> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await tx<
+      Array<{
+        drafted: number;
+        sent: number;
+        sent_as_written: number;
+        mean_edit_ratio: string | null;
+      }>
+    >`
+      SELECT count(*)::int AS drafted,
+             count(matched_at)::int AS sent,
+             count(*) FILTER (WHERE edit_ratio >= 0.9)::int AS sent_as_written,
+             avg(edit_ratio) AS mean_edit_ratio
+      FROM drafts
+    `;
+    return {
+      drafted: row!.drafted,
+      sent: row!.sent,
+      sent_as_written: row!.sent_as_written,
+      mean_edit_ratio: row!.mean_edit_ratio === null ? null : Number(row!.mean_edit_ratio),
+    };
+  });
+}
+
+// ---------- meetings ----------
+
+/** A meeting as the calendar projected it, description already encrypted. */
+export type SyncedMeeting = {
+  external_id: string;
+  title: string;
+  description_ciphertext: Uint8Array | null;
+  description_chars: number;
+  starts_at: string;
+  ends_at: string;
+  all_day: boolean;
+  organizer_address: string | null;
+  attendees: Array<{
+    address: string;
+    display_name?: string | undefined;
+    response?: string | undefined;
+  }>;
+  self_response: "accepted" | "tentative" | "declined" | "needsAction";
+  status: "confirmed" | "tentative" | "cancelled";
+};
+
+export async function upsertSyncedMeetings(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    connection_id: string;
+    meetings: readonly SyncedMeeting[];
+    cancelled?: readonly string[];
+  },
+): Promise<{ meetings: number; cancelled: number }> {
+  return withUser(sql, ctx, async (tx) => {
+    const d = db(tx);
+    let written = 0;
+    for (const m of input.meetings) {
+      await d
+        .insert(schema.meetings)
+        .values({
+          id: uuidv7(),
+          organization_id: ctx.organizationId,
+          owner_user_id: ctx.userId,
+          connection_id: input.connection_id,
+          external_id: m.external_id,
+          title: m.title,
+          description_ciphertext: m.description_ciphertext,
+          description_chars: m.description_chars,
+          starts_at: m.starts_at,
+          ends_at: m.ends_at,
+          all_day: m.all_day,
+          organizer_address: m.organizer_address,
+          attendees: m.attendees,
+          self_response: m.self_response,
+          status: m.status,
+        })
+        .onConflictDoUpdate({
+          target: [schema.meetings.connection_id, schema.meetings.external_id],
+          set: {
+            title: m.title,
+            description_ciphertext: m.description_ciphertext,
+            description_chars: m.description_chars,
+            starts_at: m.starts_at,
+            ends_at: m.ends_at,
+            all_day: m.all_day,
+            organizer_address: m.organizer_address,
+            attendees: m.attendees,
+            self_response: m.self_response,
+            status: m.status,
+            updated_at: rawSql`now()`,
+          },
+        });
+      written += 1;
+    }
+    // Google reports a cancelled event with its id and little else; the row
+    // we already hold is marked, not rewritten from a shell.
+    let cancelled = 0;
+    for (const id of input.cancelled ?? []) {
+      const rows = await d
+        .update(schema.meetings)
+        .set({ status: "cancelled", updated_at: rawSql`now()` })
+        .where(
+          and(
+            eq(schema.meetings.connection_id, input.connection_id),
+            eq(schema.meetings.external_id, id),
+          ),
+        )
+        .returning({ id: schema.meetings.id });
+      cancelled += rows.length;
+    }
+    return { meetings: written, cancelled };
+  });
+}
+
+/**
+ * Puts the last and next meeting with each contact onto the contact row.
+ * A meeting counts when it is not cancelled and the person did not decline.
+ * One statement, under the person's scope.
+ */
+export async function refreshContactMeetingStamps(
+  sql: Sql,
+  ctx: UserContext,
+  now: Date,
+): Promise<{ contacts: number }> {
+  return withUser(sql, ctx, async (tx) => {
+    const at = now.toISOString();
+    const rows = await tx<Array<{ id: string }>>`
+      WITH stamps AS (
+        SELECT c.id,
+          (SELECT m.starts_at FROM meetings m
+            WHERE m.status <> 'cancelled' AND m.self_response <> 'declined'
+              AND m.attendees @> jsonb_build_array(jsonb_build_object('address', c.external_id))
+              AND m.starts_at < ${at}::timestamptz
+            ORDER BY m.starts_at DESC LIMIT 1) AS last_at,
+          (SELECT m.title FROM meetings m
+            WHERE m.status <> 'cancelled' AND m.self_response <> 'declined'
+              AND m.attendees @> jsonb_build_array(jsonb_build_object('address', c.external_id))
+              AND m.starts_at < ${at}::timestamptz
+            ORDER BY m.starts_at DESC LIMIT 1) AS last_title,
+          (SELECT m.starts_at FROM meetings m
+            WHERE m.status <> 'cancelled' AND m.self_response <> 'declined'
+              AND m.attendees @> jsonb_build_array(jsonb_build_object('address', c.external_id))
+              AND m.starts_at >= ${at}::timestamptz
+            ORDER BY m.starts_at ASC LIMIT 1) AS next_at,
+          (SELECT m.title FROM meetings m
+            WHERE m.status <> 'cancelled' AND m.self_response <> 'declined'
+              AND m.attendees @> jsonb_build_array(jsonb_build_object('address', c.external_id))
+              AND m.starts_at >= ${at}::timestamptz
+            ORDER BY m.starts_at ASC LIMIT 1) AS next_title
+        FROM contacts c
+      )
+      UPDATE contacts c
+      SET last_meeting_at = s.last_at, last_meeting_title = s.last_title,
+          next_meeting_at = s.next_at, next_meeting_title = s.next_title,
+          updated_at = now()
+      FROM stamps s
+      WHERE c.id = s.id
+        AND (c.last_meeting_at IS DISTINCT FROM s.last_at
+          OR c.last_meeting_title IS DISTINCT FROM s.last_title
+          OR c.next_meeting_at IS DISTINCT FROM s.next_at
+          OR c.next_meeting_title IS DISTINCT FROM s.next_title)
+      RETURNING c.id
+    `;
+    return { contacts: rows.length };
+  });
+}
+
+export type ContactMeetingRow = {
+  external_id: string;
+  title: string;
+  description_ciphertext: Uint8Array | null;
+  starts_at: string;
+  ends_at: string;
+  status: "confirmed" | "tentative" | "cancelled";
+  self_response: "accepted" | "tentative" | "declined" | "needsAction";
+};
+
+/** Meetings with one contact, newest first. Descriptions are ciphertext; the caller decrypts. */
+export async function listContactMeetings(
+  sql: Sql,
+  ctx: UserContext,
+  contactAddress: string,
+  opts: { limit?: number } = {},
+): Promise<ContactMeetingRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<
+      Array<{
+        external_id: string;
+        title: string;
+        description_ciphertext: Uint8Array | null;
+        starts_at: Date;
+        ends_at: Date;
+        status: "confirmed" | "tentative" | "cancelled";
+        self_response: "accepted" | "tentative" | "declined" | "needsAction";
+      }>
+    >`
+      SELECT external_id, title, description_ciphertext, starts_at, ends_at, status, self_response
+      FROM meetings
+      WHERE status <> 'cancelled' AND self_response <> 'declined'
+        AND attendees @> jsonb_build_array(jsonb_build_object('address', ${contactAddress}::text))
+      ORDER BY starts_at DESC
+      LIMIT ${opts.limit ?? 6}
+    `;
+    return rows.map((r) => ({
+      ...r,
+      starts_at: new Date(r.starts_at).toISOString(),
+      ends_at: new Date(r.ends_at).toISOString(),
+    }));
+  });
+}
+
+export async function getCalendarSyncToken(
+  sql: Sql,
+  ctx: UserContext,
+  connectionId: string,
+): Promise<string | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx)
+      .select({ token: schema.user_connections.calendar_sync_token })
+      .from(schema.user_connections)
+      .where(eq(schema.user_connections.id, connectionId));
+    return row?.token ?? null;
+  });
+}
+
+export async function setCalendarSyncToken(
+  sql: Sql,
+  ctx: UserContext,
+  connectionId: string,
+  token: string | null,
+): Promise<void> {
+  await withUser(sql, ctx, async (tx) => {
+    await db(tx)
+      .update(schema.user_connections)
+      .set({ calendar_sync_token: token, updated_at: rawSql`now()` })
+      .where(eq(schema.user_connections.id, connectionId));
   });
 }
 
@@ -485,6 +899,9 @@ export type PendingObligationRow = {
   has_open_deal: boolean | null;
   open_deal_value: number | null;
   last_meeting_at: string | null;
+  last_meeting_title: string | null;
+  next_meeting_at: string | null;
+  next_meeting_title: string | null;
   /** Present when the agent has judged this thread in its current state. */
   assessment: ThreadAssessment | null;
 };
@@ -527,6 +944,9 @@ export async function listPendingObligations(
         has_open_deal: schema.contacts.has_open_deal,
         open_deal_value: schema.contacts.open_deal_value,
         last_meeting_at: schema.contacts.last_meeting_at,
+        last_meeting_title: schema.contacts.last_meeting_title,
+        next_meeting_at: schema.contacts.next_meeting_at,
+        next_meeting_title: schema.contacts.next_meeting_title,
         assessment: schema.thread_assessments.assessment,
         assessed_last_message_at: schema.thread_assessments.assessed_last_message_at,
       })
@@ -565,6 +985,9 @@ export async function listPendingObligations(
         has_open_deal: r.has_open_deal,
         open_deal_value: r.open_deal_value !== null ? Number(r.open_deal_value) : null,
         last_meeting_at: r.last_meeting_at ? new Date(r.last_meeting_at).toISOString() : null,
+        last_meeting_title: r.last_meeting_title,
+        next_meeting_at: r.next_meeting_at ? new Date(r.next_meeting_at).toISOString() : null,
+        next_meeting_title: r.next_meeting_title,
         assessment: fresh ? (r.assessment as ThreadAssessment) : null,
       };
     });
@@ -847,6 +1270,15 @@ export type ObligationForDraft = {
   };
   contact: { id: string; external_id: string; display_name: string; account_name: string | null };
   connection_id: string;
+  facts: {
+    has_open_deal: boolean | null;
+    open_deal_value: number | null;
+    last_meeting_at: string | null;
+    last_meeting_title: string | null;
+    next_meeting_at: string | null;
+    next_meeting_title: string | null;
+  };
+  assessment: ThreadAssessment | null;
 };
 
 /**
@@ -873,15 +1305,33 @@ export async function getObligationForDraft(
         display_name: schema.contacts.display_name,
         account_name: schema.contacts.account_name,
         connection_id: schema.threads.connection_id,
+        thread_last_message_at: schema.threads.last_message_at,
+        has_open_deal: schema.contacts.has_open_deal,
+        open_deal_value: schema.contacts.open_deal_value,
+        last_meeting_at: schema.contacts.last_meeting_at,
+        last_meeting_title: schema.contacts.last_meeting_title,
+        next_meeting_at: schema.contacts.next_meeting_at,
+        next_meeting_title: schema.contacts.next_meeting_title,
+        assessment: schema.thread_assessments.assessment,
+        assessed_last_message_at: schema.thread_assessments.assessed_last_message_at,
       })
       .from(schema.obligations)
       .innerJoin(schema.threads, eq(schema.threads.id, schema.obligations.thread_id))
       .innerJoin(schema.contacts, eq(schema.contacts.id, schema.obligations.contact_id))
+      .leftJoin(
+        schema.thread_assessments,
+        eq(schema.thread_assessments.thread_id, schema.obligations.thread_id),
+      )
       .where(
         and(eq(schema.obligations.id, obligationId), eq(schema.obligations.outcome, "pending")),
       )
       .limit(1);
     if (!row) return null;
+    const fresh =
+      row.assessment !== null &&
+      row.assessed_last_message_at !== null &&
+      new Date(row.assessed_last_message_at).getTime() >=
+        new Date(row.thread_last_message_at).getTime();
     return {
       obligation_id: row.obligation_id,
       kind: row.kind,
@@ -899,6 +1349,15 @@ export async function getObligationForDraft(
         account_name: row.account_name,
       },
       connection_id: row.connection_id,
+      facts: {
+        has_open_deal: row.has_open_deal,
+        open_deal_value: row.open_deal_value !== null ? Number(row.open_deal_value) : null,
+        last_meeting_at: row.last_meeting_at ? new Date(row.last_meeting_at).toISOString() : null,
+        last_meeting_title: row.last_meeting_title,
+        next_meeting_at: row.next_meeting_at ? new Date(row.next_meeting_at).toISOString() : null,
+        next_meeting_title: row.next_meeting_title,
+      },
+      assessment: fresh ? (row.assessment as ThreadAssessment) : null,
     };
   });
 }

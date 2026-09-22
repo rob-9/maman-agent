@@ -19,6 +19,8 @@ import { detectObligations, type DetectionConfig } from "@maman/obligation-engin
 import type { DealSourceResolver } from "./deal-source.js";
 import { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
 import { toSyncedMessage } from "./content.js";
+import { matchSentDrafts } from "./voice.js";
+import { runCalendarStep, type CalendarStepResult } from "./sync-calendar.js";
 
 /**
  * THE L1 VERTICAL SLICE: mailbox → rows → detector → ranked obligations.
@@ -72,6 +74,9 @@ export type GmailSyncJobResult =
       contacts_upserted: number;
       threads_upserted: number;
       messages_upserted: number;
+      /** Drafts matched to what the person actually sent, this sync. */
+      drafts_matched: number;
+      calendar: CalendarStepResult;
       obligations_written: number;
       obligations_kept_decided: number;
       deals: DealStepResult;
@@ -125,6 +130,24 @@ export async function runGmailSyncJob(
     })),
   });
 
+  // Meetings, on the same Google grant. Before detection: a booked call
+  // cancels a chase, and a follow-up is counted from a real meeting.
+  const calendar = await runCalendarStep(
+    {
+      sql: deps.sql,
+      credentials: deps.credentials,
+      transport: deps.transport,
+      contentKey: deps.contentKey,
+      now: deps.now,
+    },
+    ctx,
+    { id: conn.id, scopes: conn.scopes },
+    synced.self_addresses,
+  );
+
+  // What the person sent from a draft is now in the store; record how close it was.
+  const matchedDrafts = await matchSentDrafts({ sql: deps.sql, contentKey: deps.contentKey }, ctx);
+
   // The CRM's answer, if there is a CRM. A CRM that is down must not take the
   // mailbox down with it: the sync completes on whatever deal state the
   // contacts already hold, and the result says the CRM was not heard.
@@ -144,7 +167,7 @@ export async function runGmailSyncJob(
   // so its judgments key to real obligations. Never before, never instead.
   const agent = deps.agent
     ? await runAgentPass(
-        { ...deps.agent, sql: deps.sql, contentKey: deps.contentKey },
+        { ...deps.agent, sql: deps.sql, contentKey: deps.contentKey, now: deps.now },
         ctx,
         synced.self_addresses,
       )
@@ -161,6 +184,8 @@ export async function runGmailSyncJob(
     contacts_upserted: upserted.contacts,
     threads_upserted: upserted.threads,
     messages_upserted: upserted.messages,
+    drafts_matched: matchedDrafts.matched,
+    calendar,
     obligations_written: replaced.written,
     obligations_kept_decided: replaced.kept_decided,
     deals,

@@ -14,6 +14,17 @@ import {
   listContactThreads,
   listRecentOutboundMessages,
   listThreadHistoryIds,
+  listOutboundFollowUps,
+  listOutboundMessagesForContact,
+  recordDraft,
+  listUnmatchedDrafts,
+  matchDraftToSent,
+  draftOutcomes,
+  upsertSyncedMeetings,
+  refreshContactMeetingStamps,
+  listContactMeetings,
+  getCalendarSyncToken,
+  setCalendarSyncToken,
   type SyncedThread,
 } from "../../src/workspace.js";
 import { startTestDb, type TestDb } from "./setup.js";
@@ -676,5 +687,201 @@ describe("stored messages", () => {
         (tx) => tx`SELECT count(*)::int AS n FROM messages WHERE external_id IN ('m1','m2')`,
       ),
     ).toEqual([{ n: 0 }]);
+  });
+});
+
+describe("voice retrieval and the record of drafts", () => {
+  const sql = () => db.client.sql;
+  const ct = (s: string) => Buffer.from(`enc:${s}`);
+  const msg = (
+    external_id: string,
+    direction: "inbound" | "outbound",
+    sent_at: string,
+    chars = 100,
+  ) => ({
+    external_id,
+    from_address: direction === "outbound" ? "me@co.example" : "kim@x.com",
+    direction,
+    sent_at,
+    body_ciphertext: ct(external_id),
+    body_chars: chars,
+  });
+  let kimContact = "";
+  let threadId = "";
+  let obligationId = "";
+
+  it("finds the person's messages to one contact, and their past follow-ups (a message after their own)", async () => {
+    await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "v-1",
+          subject: "Kim thread",
+          contact: { address: "kim@x.com" },
+          last_message_at: "2026-09-04T09:00:00.000Z",
+          messages: [
+            msg("k1", "outbound", "2026-09-01T09:00:00.000Z"),
+            msg("k2", "outbound", "2026-09-02T09:00:00.000Z"), // a chase: after my own
+            msg("k3", "inbound", "2026-09-03T09:00:00.000Z"),
+            msg("k4", "outbound", "2026-09-04T09:00:00.000Z"), // a reply, not a chase
+            msg("k5", "outbound", "2026-09-04T10:00:00.000Z", 10), // too short to count as writing
+          ],
+        }),
+      ],
+    });
+    const inputs = await loadDetectionInputs(sql(), ctx);
+    const kim = inputs.threads.find((t) => t.subject === "Kim thread")!;
+    kimContact = kim.contact_id;
+    threadId = kim.thread_id;
+    const toKim = await listOutboundMessagesForContact(sql(), ctx, kimContact, { limit: 3 });
+    expect(toKim.map((m) => m.external_id)).toEqual(["k4", "k2", "k1"]);
+    const chases = await listOutboundFollowUps(sql(), ctx, { limit: 5 });
+    expect(chases.map((m) => m.external_id)).toEqual(["k2"]);
+  });
+
+  it("records a draft encrypted, matches it to the message the person then sent, and measures the edit", async () => {
+    await replacePendingObligations(
+      sql(),
+      ctx,
+      [
+        {
+          thread_id: threadId,
+          contact_id: kimContact,
+          kind: "awaiting_them",
+          rank: 40,
+          reason: { days_elapsed: 6 },
+        },
+      ],
+      new Date("2026-09-10T12:00:00.000Z"),
+    );
+    obligationId = (await listPendingObligations(sql(), ctx)).find(
+      (o) => o.thread_id === threadId,
+    )!.id;
+    const { id } = await recordDraft(sql(), ctx, {
+      obligation_id: obligationId,
+      thread_id: threadId,
+      gmail_draft_id: "gd-1",
+      subject: "Re: Kim thread",
+      body_ciphertext: ct("draft body"),
+      body_chars: 10,
+      composer: "model",
+      model_alias: "m",
+    });
+    expect((await listUnmatchedDrafts(sql(), ctx)).map((d) => d.id)).toEqual([id]);
+    await matchDraftToSent(sql(), ctx, id, {
+      external_id: "k9",
+      sent_at: "2026-09-11T09:00:00.000Z",
+      edit_ratio: 0.925,
+    });
+    expect(await listUnmatchedDrafts(sql(), ctx)).toEqual([]);
+    expect(await draftOutcomes(sql(), ctx)).toEqual({
+      drafted: 1,
+      sent: 1,
+      sent_as_written: 1,
+      mean_edit_ratio: 0.925,
+    });
+    const raw = await withUser(
+      sql(),
+      ctx,
+      (tx) => tx`SELECT body_ciphertext::text AS b FROM drafts`,
+    );
+    expect(String(raw[0]!["b"])).not.toContain("draft body");
+  });
+
+  it("a colleague sees no drafts and no voice", async () => {
+    const other = uuidv7();
+    await globalCreateUser(sql(), {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "peer4@co.example",
+      display_name: "Peer",
+    });
+    await addMembership(sql(), { organizationId: orgId }, { user_id: other, role: "member" });
+    const theirs = { organizationId: orgId, userId: other };
+    expect(await listUnmatchedDrafts(sql(), theirs)).toEqual([]);
+    expect(await listOutboundMessagesForContact(sql(), theirs, kimContact)).toEqual([]);
+    expect(await listOutboundFollowUps(sql(), theirs)).toEqual([]);
+  });
+});
+
+describe("meetings", () => {
+  const sql = () => db.client.sql;
+  const NOW = new Date("2026-09-21T12:00:00.000Z");
+  const meeting = (external_id: string, starts_at: string, over: Record<string, unknown> = {}) => ({
+    external_id,
+    title: `Meeting ${external_id}`,
+    description_ciphertext: Buffer.from(`enc:${external_id}`),
+    description_chars: 5,
+    starts_at,
+    ends_at: starts_at,
+    all_day: false,
+    organizer_address: "me@co.example",
+    attendees: [{ address: "ann@acme.com", display_name: "Ann" }],
+    self_response: "accepted" as const,
+    status: "confirmed" as const,
+    ...over,
+  });
+
+  it("stores meetings, marks cancellations, and stamps each contact with the last and next meeting", async () => {
+    const r = await upsertSyncedMeetings(sql(), ctx, {
+      connection_id: connId,
+      meetings: [
+        meeting("past", "2026-09-17T15:00:00.000Z"),
+        meeting("older", "2026-09-10T15:00:00.000Z"),
+        meeting("soon", "2026-09-24T15:00:00.000Z"),
+        meeting("later", "2026-09-30T15:00:00.000Z"),
+        meeting("declined", "2026-09-22T15:00:00.000Z", { self_response: "declined" }),
+        meeting("gone", "2026-09-23T15:00:00.000Z"),
+      ],
+    });
+    expect(r).toEqual({ meetings: 6, cancelled: 0 });
+    const c = await upsertSyncedMeetings(sql(), ctx, {
+      connection_id: connId,
+      meetings: [],
+      cancelled: ["gone", "never-seen"],
+    });
+    expect(c).toEqual({ meetings: 0, cancelled: 1 });
+    const stamped = await refreshContactMeetingStamps(sql(), ctx, NOW);
+    expect(stamped.contacts).toBe(1);
+    const rows = await withUser(
+      sql(),
+      ctx,
+      (tx) =>
+        tx`SELECT last_meeting_at, last_meeting_title, next_meeting_at, next_meeting_title FROM contacts WHERE external_id = 'ann@acme.com'`,
+    );
+    expect(rows[0]).toMatchObject({
+      last_meeting_title: "Meeting past",
+      next_meeting_title: "Meeting soon",
+    });
+    expect(new Date(rows[0]!["last_meeting_at"] as string).toISOString()).toBe(
+      "2026-09-17T15:00:00.000Z",
+    );
+    expect(new Date(rows[0]!["next_meeting_at"] as string).toISOString()).toBe(
+      "2026-09-24T15:00:00.000Z",
+    );
+    // Running it again with nothing changed touches no row.
+    expect((await refreshContactMeetingStamps(sql(), ctx, NOW)).contacts).toBe(0);
+  });
+
+  it("lists the meetings with a contact, skipping declined and cancelled, and keeps the sync token per connection", async () => {
+    const list = await listContactMeetings(sql(), ctx, "ann@acme.com");
+    expect(list.map((m) => m.external_id)).toEqual(["later", "soon", "past", "older"]);
+    expect(await getCalendarSyncToken(sql(), ctx, connId)).toBeNull();
+    await setCalendarSyncToken(sql(), ctx, connId, "tok-1");
+    expect(await getCalendarSyncToken(sql(), ctx, connId)).toBe("tok-1");
+  });
+
+  it("a colleague sees no meetings", async () => {
+    const other = uuidv7();
+    await globalCreateUser(sql(), {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "peer5@co.example",
+      display_name: "Peer",
+    });
+    await addMembership(sql(), { organizationId: orgId }, { user_id: other, role: "member" });
+    expect(
+      await listContactMeetings(sql(), { organizationId: orgId, userId: other }, "ann@acme.com"),
+    ).toEqual([]);
   });
 });

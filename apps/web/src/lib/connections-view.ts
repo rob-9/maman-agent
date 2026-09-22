@@ -96,7 +96,7 @@ export function noticeFrom(params: {
   connected?: string;
   error?: string;
 }): Notice | null {
-  const names: Record<string, string> = { gmail: "Gmail", salesforce: "Salesforce" };
+  const names: Record<string, string> = { gmail: "Google", salesforce: "Salesforce" };
   const name = params.provider ? (names[params.provider] ?? params.provider) : "";
   if (params.connected) return { tone: "ok", text: `${name} connected.` };
   if (params.error) {

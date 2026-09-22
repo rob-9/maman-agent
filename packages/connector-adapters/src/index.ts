@@ -70,3 +70,17 @@ export {
   type GmailContentConfig,
   type ThreadContentReader,
 } from "./gmail-content.js";
+export {
+  projectEvent,
+  projectEvents,
+  type CalendarAttendee,
+  type CalendarEvent,
+  type ProjectedAttendee,
+  type ProjectedMeeting,
+} from "./calendar-project.js";
+export {
+  syncCalendarEvents,
+  type CalendarSyncConfig,
+  type CalendarSyncOptions,
+  type CalendarSyncResult,
+} from "./calendar.js";

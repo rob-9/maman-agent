@@ -47,12 +47,13 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     token_endpoint: "https://oauth2.googleapis.com/token",
     revocation_endpoint: "https://oauth2.googleapis.com/revoke",
     supports_pkce: true,
-    // Read-only mail + compose (drafts). NEVER gmail.send. Detection reads
-    // headers only; the agent reads the body of a candidate thread at
-    // judgment time and never stores it.
+    // One Google consent: read-only mail, drafts, read-only calendar. NEVER
+    // gmail.send. Mail and meetings are the agent's inputs; both are stored
+    // encrypted to the person.
     scopes: [
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/calendar.readonly",
     ],
     supports_enterprise_install: true,
   },

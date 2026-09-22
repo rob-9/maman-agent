@@ -27,6 +27,11 @@ export const assessmentMessageSchema = z
   .strict();
 export type AssessmentMessage = z.infer<typeof assessmentMessageSchema>;
 
+export const meetingRefSchema = z
+  .object({ title: promptSafeText(200), at: z.string().datetime() })
+  .strict();
+export type MeetingRef = z.infer<typeof meetingRefSchema>;
+
 export const assessmentInputSchema = z
   .object({
     kind: z.enum(["awaiting_you", "awaiting_them", "unsent_followup"]),
@@ -37,6 +42,9 @@ export const assessmentInputSchema = z
     has_open_deal: z.boolean().nullable(),
     open_deal_value: z.number().nonnegative().optional(),
     last_meeting_at: z.string().datetime().optional(),
+    /** The last meeting with this person, and the next one booked, when known. */
+    last_meeting: meetingRefSchema.extend({ notes: promptSafeText(1500).optional() }).optional(),
+    next_meeting: meetingRefSchema.optional(),
     /** Oldest first. The last one is the message the obligation hinges on. */
     messages: z.array(assessmentMessageSchema).min(1).max(8),
     /** The relationship so far: other threads with this person, newest first. */
@@ -75,6 +83,11 @@ const CLOSED_LOOP =
   /\b(thanks?|thank you|all set|no need|not interested|we'?ll pass|unsubscribe|got it,? thanks|sounds good,? thanks)\b/i;
 const AUTOMATED =
   /\b(out of office|automatic reply|auto-?reply|do not reply|noreply|no-reply|unsubscribe)\b/i;
+
+/** "Thursday", in UTC; the model and the card get the same word. */
+export function weekday(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+}
 
 /** The sentence holding the last question mark, trimmed to the field bound. */
 export function lastQuestion(text: string): string {
@@ -135,12 +148,24 @@ export function assessDeterministically(input: AssessmentInput): AssessmentOutpu
   }
 
   if (input.kind === "unsent_followup") {
+    const met = input.last_meeting ? ` for "${input.last_meeting.title.slice(0, 80)}"` : "";
     return {
       owed: true,
       ask: "",
-      summary: `You met ${who} and nothing has gone out since${money}.`,
+      summary: `You met ${who}${met} and nothing has gone out since${money}.`,
       urgency: input.has_open_deal === true ? "high" : "normal",
       confidence: 0.7,
+    };
+  }
+
+  // A meeting already booked with this person is the follow-up.
+  if (input.kind === "awaiting_them" && input.next_meeting) {
+    return {
+      owed: false,
+      ask: "",
+      summary: `You are meeting ${who} for "${input.next_meeting.title.slice(0, 80)}" on ${weekday(input.next_meeting.at)}; no chase needed.`,
+      urgency: "low",
+      confidence: 0.8,
     };
   }
 

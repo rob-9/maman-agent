@@ -321,3 +321,28 @@ describe("rankObligation", () => {
     expect(atThreshold).toBe(30);
   });
 });
+
+describe("a meeting already on the calendar", () => {
+  it("cancels a chase on a quiet thread, right up to the moment it starts", () => {
+    const quiet = thread({ last_message_at: ago(9) });
+    expect(detect([quiet], [contact({ next_meeting_at: ago(-2) })])).toEqual([]);
+    // Boundary: a meeting exactly now is not "upcoming"; the chase is owed again.
+    expect(detect([quiet], [contact({ next_meeting_at: NOW.toISOString() })])).toHaveLength(1);
+    expect(detect([quiet], [contact({ next_meeting_at: ago(1) })])).toHaveLength(1);
+  });
+
+  it("does not cancel a reply that is owed: they wrote, and a booked call does not answer an email", () => {
+    const owed = thread({ last_message_at: ago(4), last_direction: "inbound" });
+    const [o] = detect([owed], [contact({ next_meeting_at: ago(-2) })]);
+    expect(o!.kind).toBe("awaiting_you");
+  });
+
+  it("carries the meeting an unsent follow-up is counted from", () => {
+    const [o] = detect(
+      [thread({ last_message_at: ago(10) })],
+      [contact({ last_meeting_at: ago(3) })],
+    );
+    expect(o!.kind).toBe("unsent_followup");
+    expect(o!.reason.last_meeting_at).toBe(ago(3));
+  });
+});

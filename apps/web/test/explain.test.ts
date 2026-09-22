@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { explain, type ObligationView } from "../src/lib/explain.js";
+import { explain, nextMeetingLine, type ObligationView } from "../src/lib/explain.js";
 
 const o = (over: Partial<ObligationView> = {}): ObligationView => ({
   id: "1",
@@ -18,6 +18,10 @@ const o = (over: Partial<ObligationView> = {}): ObligationView => ({
   subject: "Enterprise pricing",
   contact_display_name: "Sarah Chen",
   contact_account_name: null,
+  last_meeting_at: null,
+  last_meeting_title: null,
+  next_meeting_at: null,
+  next_meeting_title: null,
   assessment: null,
   ...over,
 });
@@ -64,5 +68,34 @@ describe("what the card says", () => {
         "assist",
       ).ask,
     ).toBeNull();
+  });
+});
+
+describe("meetings on the card", () => {
+  it("names the meeting a follow-up is counted from, and the next one booked", () => {
+    const met = o({
+      kind: "unsent_followup",
+      reason: {
+        days_elapsed: 2,
+        threshold_days: 1,
+        last_direction: "outbound",
+        message_count: 3,
+        has_open_deal: null,
+      },
+      last_meeting_at: "2026-09-17T15:00:00.000Z",
+      last_meeting_title: "Pricing review",
+    });
+    expect(explain(met).detail).toBe(
+      'You met 2 days ago for "Pricing review" and nothing has gone out since.',
+    );
+    const booked = o({
+      next_meeting_at: "2026-09-24T15:00:00.000Z",
+      next_meeting_title: "Kickoff",
+    });
+    expect(nextMeetingLine(booked, new Date("2026-09-21T12:00:00Z"))).toBe(
+      "Meeting Thursday: Kickoff",
+    );
+    expect(nextMeetingLine(booked, new Date("2026-09-30T12:00:00Z"))).toBeNull();
+    expect(nextMeetingLine(o())).toBeNull();
   });
 });

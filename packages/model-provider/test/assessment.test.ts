@@ -188,3 +188,31 @@ describe("the deterministic judgment", () => {
     expect(bad).toMatchObject({ ok: false, error: "policy_violation" });
   });
 });
+
+describe("meetings in the judgment", () => {
+  it("a booked meeting means no chase; a past meeting names what you met about", () => {
+    const booked = assessDeterministically(
+      base({
+        kind: "awaiting_them",
+        next_meeting: { title: "Kickoff", at: "2026-09-24T15:00:00.000Z" },
+      }),
+    );
+    expect(booked).toMatchObject({ owed: false, urgency: "low" });
+    expect(booked.summary).toBe(
+      'You are meeting Sarah Chen for "Kickoff" on Thursday; no chase needed.',
+    );
+    const met = assessDeterministically(
+      base({
+        kind: "unsent_followup",
+        last_meeting: { title: "Pricing review", at: "2026-09-17T15:00:00.000Z" },
+      }),
+    );
+    expect(met.summary).toContain('You met Sarah Chen for "Pricing review"');
+    // A booked meeting does not answer an email they are waiting on.
+    expect(
+      assessDeterministically(
+        base({ next_meeting: { title: "Kickoff", at: "2026-09-24T15:00:00.000Z" } }),
+      ).owed,
+    ).toBe(true);
+  });
+});

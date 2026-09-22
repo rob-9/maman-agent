@@ -38,6 +38,11 @@ export async function globalGetUserByWorkosId(sql: Sql, workosUserId: string) {
   return rows[0] ?? null;
 }
 
+export async function globalGetUserById(sql: Sql, userId: string) {
+  const rows = await drizzle(sql).select().from(schema.users).where(eq(schema.users.id, userId));
+  return rows[0] ?? null;
+}
+
 export async function globalGetOrganizationByWorkosId(sql: Sql, workosOrganizationId: string) {
   const rows = await drizzle(sql)
     .select()

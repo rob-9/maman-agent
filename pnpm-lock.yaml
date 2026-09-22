@@ -973,6 +973,9 @@ importers:
 
   packages/voice-engine:
     dependencies:
+      '@maman/model-provider':
+        specifier: workspace:*
+        version: link:../model-provider
       zod:
         specifier: ^3.24.1
         version: 3.25.76

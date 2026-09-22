@@ -39,8 +39,8 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
       >
         <Integration
           mark={<GmailMark size={26} />}
-          name="Gmail"
-          description="Reads your mail so your agent has the full conversation. Stored encrypted to your account and visible only to you. Creates drafts but cannot send."
+          name="Google"
+          description="Gmail and Calendar. Reads your mail and meetings so your agent has the full picture. Stored encrypted to your account and visible only to you. Creates drafts but cannot send."
           presentation={describeGmail(gmail)}
           action={
             gmail && gmail.status === "active" ? (
@@ -52,7 +52,7 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
             ) : (
               <form action={connectAction.bind(null, "gmail")}>
                 <button className="button" type="submit">
-                  {gmail ? "Reconnect Gmail" : "Connect Gmail"}
+                  {gmail ? "Reconnect Google" : "Connect Google"}
                 </button>
               </form>
             )

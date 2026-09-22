@@ -99,4 +99,4 @@ export const me = {
     ),
 };
 
-export { explain } from "./explain.js";
+export { explain, nextMeetingLine } from "./explain.js";

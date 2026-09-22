@@ -126,6 +126,15 @@ function kindFor(
     }
   }
 
+  // A meeting already on the calendar with this person is the follow-up. A
+  // chase on Tuesday about a call booked for Wednesday is noise, and noise is
+  // how a list gets ignored.
+  if (
+    contact.next_meeting_at !== undefined &&
+    Date.parse(contact.next_meeting_at) > now.getTime()
+  ) {
+    return null;
+  }
   return days >= config.awaiting_them_days ? { kind: "awaiting_them", days } : null;
 }
 
@@ -177,6 +186,9 @@ export function detectObligations(input: DetectInput): Obligation[] {
         has_open_deal: contact.has_open_deal,
         ...(contact.open_deal_value !== undefined
           ? { open_deal_value: contact.open_deal_value }
+          : {}),
+        ...(matched.kind === "unsent_followup" && contact.last_meeting_at !== undefined
+          ? { last_meeting_at: contact.last_meeting_at }
           : {}),
       },
     });

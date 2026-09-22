@@ -25,7 +25,10 @@ import type {
 import type { AssessmentInput, ModelProvider } from "@maman/model-provider";
 import { createUserVaultCredentialProvider } from "../../src/user-vault-credentials.js";
 import { runGmailSyncJob } from "../../src/sync-gmail.js";
-import { decryptBody, storedThreadContent } from "../../src/content.js";
+import { decryptBody, encryptBody, storedThreadContent } from "../../src/content.js";
+import { voiceFor } from "../../src/voice.js";
+import { meetingContext } from "../../src/meetings.js";
+import { recordDraft, draftOutcomes } from "@maman/db";
 
 /**
  * THE SLICE, END TO END, ON A REAL DATABASE.
@@ -99,8 +102,24 @@ const MAILBOX: Record<string, unknown> = {
   fresh: gmailThread("fresh", "alice@co.example", "dan@client.com", ago(1), "Intro"),
 };
 
+/** Alice's calendar, scripted. Set per test. */
+let CALENDAR: { items: unknown[]; nextSyncToken?: string; status?: number } = { items: [] };
+const calendarRequests: HttpRequest[] = [];
+
 const transport = async (req: HttpRequest): Promise<HttpResponse> => {
   const url = new URL(req.url);
+  if (url.pathname.includes("/calendar/")) {
+    calendarRequests.push(req);
+    if (CALENDAR.status) return { status: CALENDAR.status, headers: {}, body: {} };
+    return {
+      status: 200,
+      headers: {},
+      body: {
+        items: CALENDAR.items,
+        ...(CALENDAR.nextSyncToken ? { nextSyncToken: CALENDAR.nextSyncToken } : {}),
+      },
+    };
+  }
   if (url.pathname.endsWith("/profile")) {
     return { status: 200, headers: {}, body: { emailAddress: "alice@co.example" } };
   }
@@ -145,7 +164,7 @@ async function linkGmail(userId: string, label: string) {
         (id, organization_id, owner_user_id, provider, external_account_label,
          encrypted_credentials, scopes, status)
       VALUES (${connId}, ${orgId}, ${userId}, 'gmail', ${label}, ${packed},
-              ARRAY['gmail.metadata'], 'active')
+              ARRAY['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/calendar.readonly'], 'active')
     `;
   });
   return connId;
@@ -376,6 +395,7 @@ describe("the agent pass", () => {
     id: "demo",
     nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
     draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
+    composeDraft: async () => ({ ok: false, error: "unavailable" }),
     async assessObligation(input) {
       seen.push(input);
       if (mode === "down") return { ok: false, error: "unavailable" };
@@ -558,5 +578,197 @@ describe("the agent pass", () => {
     await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
     const result = await runGmailSyncJob(withAgent(1), ctx);
     expect(result.ok && result.agent).toMatchObject({ considered: 1, assessed: 1 });
+  });
+});
+
+describe("voice, and what the person actually sent", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+
+  it("retrieves the person's own writing for a contact from the store", async () => {
+    // Alice's outbound "Proposal" message to Bob has a body now.
+    MAILBOX["waiting"] = gmailThread(
+      "waiting",
+      "alice@co.example",
+      "bob@client.com",
+      ago(9),
+      "Proposal",
+      "Hi Bob, sending the proposal over. Let me know what you think by Thursday and I will hold the pricing.\n\nCheers,\nAlice",
+    );
+    await runGmailSyncJob(deps(), ctx);
+    const inputs = await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`SELECT c.id FROM contacts c WHERE c.external_id = 'bob@client.com'`,
+    );
+    const voice = await voiceFor(
+      { sql: client.sql, contentKey: master },
+      ctx,
+      inputs[0]!["id"] as string,
+    );
+    expect(voice.to_this_contact[0]).toContain("Hi Bob, sending the proposal over.");
+    expect(voice.recent[0]).toContain("Cheers,\nAlice");
+    expect(voice.similar_situations).toEqual([]);
+  });
+
+  it("matches a draft to the message the person then sent, and records how close it was", async () => {
+    const pending = await listPendingObligations(client.sql, ctx, 50);
+    const proposal = pending.find((o) => o.subject === "Proposal")!;
+    const draftBody =
+      "Hi Bob,\n\nFollowing up on the proposal. Does Thursday still work?\n\nCheers,\nAlice\n";
+    await recordDraft(client.sql, ctx, {
+      obligation_id: proposal.id,
+      thread_id: proposal.thread_id,
+      gmail_draft_id: "gd-x",
+      subject: "Re: Proposal",
+      body_ciphertext: encryptBody(draftBody, master, ctx),
+      body_chars: draftBody.length,
+      composer: "model",
+    });
+    // Alice sends it, lightly edited; the next sync sees it on the thread.
+    (MAILBOX["waiting"] as { historyId: string }).historyId = "h-waiting-sent";
+    (MAILBOX["waiting"] as { messages: unknown[] }).messages.push({
+      id: "waiting-sent",
+      internalDate: String(Date.now() + 60_000),
+      payload: {
+        headers: [
+          { name: "From", value: "alice@co.example" },
+          { name: "To", value: "bob@client.com" },
+          { name: "Subject", value: "Re: Proposal" },
+        ],
+        mimeType: "text/plain",
+        body: {
+          data: Buffer.from(
+            "Hi Bob,\n\nFollowing up on the proposal. Does Thursday or Friday work?\n\nCheers,\nAlice\n",
+          ).toString("base64url"),
+        },
+      },
+    });
+    const result = await runGmailSyncJob(deps(), ctx);
+    expect(result.ok && result.drafts_matched).toBe(1);
+    const outcomes = await draftOutcomes(client.sql, ctx);
+    expect(outcomes.sent).toBe(1);
+    expect(outcomes.mean_edit_ratio!).toBeGreaterThan(0.85);
+  });
+});
+
+describe("the calendar step", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  const event = (id: string, when: string, title: string, description?: string) => ({
+    id,
+    status: "confirmed",
+    summary: title,
+    ...(description ? { description } : {}),
+    start: { dateTime: when },
+    end: { dateTime: when },
+    attendees: [
+      { email: "alice@co.example", self: true, responseStatus: "accepted" },
+      { email: "bob@client.com", displayName: "Bob" },
+      { email: "sarah@acme.com", displayName: "Sarah Chen" },
+    ],
+  });
+
+  it("stores meetings with the description encrypted, stamps the contact, and keeps the sync token", async () => {
+    CALENDAR = {
+      items: [
+        event(
+          "m-past",
+          new Date(Number(ago(2))).toISOString(),
+          "Proposal walkthrough",
+          "Agenda: 60 seats, term, start date",
+        ),
+        event("m-next", new Date(Number(ago(-3))).toISOString(), "Kickoff"),
+      ],
+      nextSyncToken: "cal-tok-1",
+    };
+    calendarRequests.length = 0;
+    const result = await runGmailSyncJob(deps(), ctx);
+    expect(result.ok && result.calendar).toEqual({
+      ok: true,
+      listed: 2,
+      meetings_upserted: 2,
+      cancelled: 0,
+      contacts_stamped: 2,
+      resynced: false,
+    });
+    expect(calendarRequests).toHaveLength(1);
+    expect(new URL(calendarRequests[0]!.url).searchParams.get("syncToken")).toBeNull();
+    const bob = await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`SELECT last_meeting_title, next_meeting_title FROM contacts WHERE external_id = 'bob@client.com'`,
+    );
+    expect(bob[0]).toEqual({
+      last_meeting_title: "Proposal walkthrough",
+      next_meeting_title: "Kickoff",
+    });
+    const raw = await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`SELECT to_jsonb(m)::text AS j FROM meetings m`,
+    );
+    for (const r of raw) expect(String(r["j"])).not.toContain("60 seats, term");
+    // A booked meeting with Bob: the chase on "Proposal" is no longer an obligation.
+    const list = await listPendingObligations(client.sql, ctx, 50);
+    expect(list.map((o) => o.subject)).not.toContain("Proposal");
+  });
+
+  it("the next sync sends the token and gets only changes; a stale token is a full window again", async () => {
+    CALENDAR = { items: [], nextSyncToken: "cal-tok-2" };
+    calendarRequests.length = 0;
+    await runGmailSyncJob(deps(), ctx);
+    expect(new URL(calendarRequests[0]!.url).searchParams.get("syncToken")).toBe("cal-tok-1");
+    CALENDAR = { items: [], status: 410 };
+    calendarRequests.length = 0;
+    const result = await runGmailSyncJob(deps(), ctx);
+    expect(result.ok && result.calendar).toMatchObject({ ok: false, reason: "sync_failed" });
+    // A calendar that fails does not take the mailbox down.
+    expect(result.ok).toBe(true);
+  });
+
+  it("the meeting reaches the agent: the judgment and the draft know what you met about", async () => {
+    CALENDAR = { items: [], nextSyncToken: "cal-tok-3" };
+    // Bob's next meeting is now in the past: the chase is back, judged with the meeting in view.
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE meetings SET starts_at = ${new Date(Number(ago(1))).toISOString()}, ends_at = ${new Date(Number(ago(1))).toISOString()} WHERE external_id = 'm-next'`,
+    );
+    const seen: AssessmentInput[] = [];
+    const provider: ModelProvider = {
+      id: "demo",
+      nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
+      draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
+      composeDraft: async () => ({ ok: false, error: "unavailable" }),
+      async assessObligation(input) {
+        seen.push(input);
+        return {
+          ok: true,
+          value: { owed: true, ask: "", summary: "s", urgency: "normal", confidence: 0.5 },
+          usage: { input_tokens: 0, output_tokens: 0, model_alias: "fake" },
+        };
+      },
+    };
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    await runGmailSyncJob({ ...deps(), agent: { provider } }, ctx);
+    // Sarah was on both meetings too; her thread is the live candidate here.
+    const pricing = seen.find((i) => i.subject === "Enterprise pricing")!;
+    expect(pricing.last_meeting).toMatchObject({ title: "Kickoff" });
+    expect(pricing.next_meeting).toBeUndefined();
+    const ctxMeetings = await meetingContext(
+      { sql: client.sql, contentKey: master },
+      ctx,
+      "bob@client.com",
+      NOW,
+    );
+    expect(ctxMeetings.last_meeting?.notes).toBeUndefined();
+    const walkthrough = await meetingContext(
+      { sql: client.sql, contentKey: master },
+      ctx,
+      "bob@client.com",
+      new Date(Number(ago(1)) + 1000),
+    );
+    expect(walkthrough.last_meeting?.title).toBe("Kickoff");
   });
 });
