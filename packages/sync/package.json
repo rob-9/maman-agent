@@ -23,7 +23,8 @@
     "@maman/db": "workspace:*",
     "@maman/obligation-engine": "workspace:*",
     "postgres": "^3.4.5",
-    "@temporalio/workflow": "^1.11.5"
+    "@temporalio/workflow": "^1.11.5",
+    "@maman/model-provider": "workspace:*"
   },
   "devDependencies": {
     "@maman/contracts": "workspace:*",

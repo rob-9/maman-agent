@@ -54,6 +54,15 @@ export const serverEnvSchema = z
      * test does not have to know about the sweep.
      */
     WORKSPACE_SWEEP_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).optional(),
+    /**
+     * The agent pass over detected obligations. `off` (default): the list is
+     * the deterministic ranking, exactly as before the agent existed.
+     * `assist`: the model reads each candidate thread and decides whether a
+     * follow-up is owed, what the ask is, and how urgent; a failed judgment
+     * leaves the arithmetic in charge for that item. Switching back is this
+     * variable and nothing else.
+     */
+    AGENT_MODE: z.enum(["off", "assist"]).optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production") {

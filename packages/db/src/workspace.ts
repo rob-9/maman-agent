@@ -1,4 +1,4 @@
-import { and, desc, eq, sql as rawSql } from "drizzle-orm";
+import { and, desc, eq, gte, sql as rawSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import type { Sql, TransactionSql } from "postgres";
 import { uuidv7 } from "@maman/contracts";
@@ -20,17 +20,30 @@ import { withUser, type UserContext } from "./tenant.js";
 
 const db = (tx: TransactionSql) => drizzle(tx as unknown as Sql, { schema });
 
+/** One message's stored form. The body arrives already encrypted; see @maman/sync content.ts. */
+export type SyncedMessage = {
+  external_id: string;
+  from_address: string;
+  from_display_name?: string | undefined;
+  direction: "inbound" | "outbound";
+  sent_at: string;
+  body_ciphertext: Uint8Array;
+  body_chars: number;
+};
+
 /** A thread as a connector projected it. Mirrors ProjectedThread, structurally. */
 export type SyncedThread = {
   external_id: string;
+  history_id?: string | undefined;
   subject: string;
   last_message_at: string;
   last_direction: "inbound" | "outbound";
   message_count: number;
   contact: { address: string; display_name?: string | undefined };
+  messages?: readonly SyncedMessage[] | undefined;
 };
 
-export type UpsertResult = { contacts: number; threads: number };
+export type UpsertResult = { contacts: number; threads: number; messages: number };
 
 /**
  * Writes what a sync produced. Idempotent: re-running with the same input
@@ -84,8 +97,9 @@ export async function upsertSyncedThreads(
     }
 
     let threadsWritten = 0;
+    let messagesWritten = 0;
     for (const t of input.threads) {
-      await d
+      const [row] = await d
         .insert(schema.threads)
         .values({
           id: uuidv7(),
@@ -98,6 +112,7 @@ export async function upsertSyncedThreads(
           last_message_at: t.last_message_at,
           last_direction: t.last_direction,
           message_count: t.message_count,
+          history_id: t.history_id ?? null,
         })
         .onConflictDoUpdate({
           target: [schema.threads.connection_id, schema.threads.external_id],
@@ -106,13 +121,48 @@ export async function upsertSyncedThreads(
             last_message_at: t.last_message_at,
             last_direction: t.last_direction,
             message_count: t.message_count,
+            history_id: t.history_id ?? null,
             updated_at: rawSql`now()`,
           },
-        });
+        })
+        .returning({ id: schema.threads.id });
       threadsWritten += 1;
+
+      // Content, encrypted before it got here. A message seen again replaces
+      // its body (an edit to a draft that was later sent, a corrected fetch).
+      for (const m of t.messages ?? []) {
+        await d
+          .insert(schema.messages)
+          .values({
+            id: uuidv7(),
+            organization_id: ctx.organizationId,
+            owner_user_id: ctx.userId,
+            thread_id: row!.id,
+            external_id: m.external_id,
+            from_address: m.from_address,
+            from_display_name: m.from_display_name ?? null,
+            direction: m.direction,
+            sent_at: m.sent_at,
+            body_ciphertext: m.body_ciphertext,
+            body_chars: m.body_chars,
+          })
+          .onConflictDoUpdate({
+            target: [schema.messages.thread_id, schema.messages.external_id],
+            set: {
+              from_address: m.from_address,
+              from_display_name: m.from_display_name ?? null,
+              direction: m.direction,
+              sent_at: m.sent_at,
+              body_ciphertext: m.body_ciphertext,
+              body_chars: m.body_chars,
+              updated_at: rawSql`now()`,
+            },
+          });
+        messagesWritten += 1;
+      }
     }
 
-    return { contacts: contactIds.size, threads: threadsWritten };
+    return { contacts: contactIds.size, threads: threadsWritten, messages: messagesWritten };
   });
 }
 
@@ -166,6 +216,125 @@ export async function loadDetectionInputs(sql: Sql, ctx: UserContext): Promise<D
           : {}),
       })),
     };
+  });
+}
+
+/** external_id → history_id for this connection, so an unchanged thread is not fetched again. */
+export async function listThreadHistoryIds(
+  sql: Sql,
+  ctx: UserContext,
+  connectionId: string,
+): Promise<Map<string, string>> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({ external_id: schema.threads.external_id, history_id: schema.threads.history_id })
+      .from(schema.threads)
+      .where(eq(schema.threads.connection_id, connectionId));
+    const map = new Map<string, string>();
+    for (const r of rows) if (r.history_id) map.set(r.external_id, r.history_id);
+    return map;
+  });
+}
+
+export type StoredMessageRow = {
+  external_id: string;
+  from_address: string;
+  from_display_name: string | null;
+  direction: "inbound" | "outbound";
+  sent_at: string;
+  body_ciphertext: Uint8Array;
+  body_chars: number;
+};
+
+/** A thread's stored messages, oldest first. Ciphertext; the caller decrypts. */
+export async function getThreadMessages(
+  sql: Sql,
+  ctx: UserContext,
+  threadId: string,
+): Promise<StoredMessageRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({
+        external_id: schema.messages.external_id,
+        from_address: schema.messages.from_address,
+        from_display_name: schema.messages.from_display_name,
+        direction: schema.messages.direction,
+        sent_at: schema.messages.sent_at,
+        body_ciphertext: schema.messages.body_ciphertext,
+        body_chars: schema.messages.body_chars,
+      })
+      .from(schema.messages)
+      .where(eq(schema.messages.thread_id, threadId))
+      .orderBy(schema.messages.sent_at, schema.messages.external_id);
+    return rows.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString() }));
+  });
+}
+
+export type ContactThreadRow = {
+  thread_id: string;
+  subject: string;
+  last_message_at: string;
+  last_direction: "inbound" | "outbound";
+  message_count: number;
+};
+
+/** The relationship so far: this person's other threads with the same contact, newest first. */
+export async function listContactThreads(
+  sql: Sql,
+  ctx: UserContext,
+  contactId: string,
+  opts: { exclude_thread_id?: string; limit?: number } = {},
+): Promise<ContactThreadRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({
+        thread_id: schema.threads.id,
+        subject: schema.threads.subject,
+        last_message_at: schema.threads.last_message_at,
+        last_direction: schema.threads.last_direction,
+        message_count: schema.threads.message_count,
+      })
+      .from(schema.threads)
+      .where(eq(schema.threads.contact_id, contactId))
+      .orderBy(desc(schema.threads.last_message_at), schema.threads.id)
+      .limit((opts.limit ?? 10) + 1);
+    return rows
+      .filter((r) => r.thread_id !== opts.exclude_thread_id)
+      .slice(0, opts.limit ?? 10)
+      .map((r) => ({ ...r, last_message_at: new Date(r.last_message_at).toISOString() }));
+  });
+}
+
+/**
+ * The person's own recent messages of some substance: the raw material for
+ * their voice. Ciphertext; the caller decrypts. Bounded by count.
+ */
+export async function listRecentOutboundMessages(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { limit?: number; min_chars?: number } = {},
+): Promise<StoredMessageRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select({
+        external_id: schema.messages.external_id,
+        from_address: schema.messages.from_address,
+        from_display_name: schema.messages.from_display_name,
+        direction: schema.messages.direction,
+        sent_at: schema.messages.sent_at,
+        body_ciphertext: schema.messages.body_ciphertext,
+        body_chars: schema.messages.body_chars,
+      })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.direction, "outbound"),
+          gte(schema.messages.body_chars, opts.min_chars ?? 80),
+        ),
+      )
+      .orderBy(desc(schema.messages.sent_at))
+      .limit(opts.limit ?? 12);
+    return rows.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString() }));
   });
 }
 
@@ -290,9 +459,20 @@ export async function replacePendingObligations(
   });
 }
 
+/** What the agent said about a thread. Mirrors AssessmentOutput, structurally. */
+export type ThreadAssessment = {
+  owed: boolean;
+  ask: string;
+  summary: string;
+  urgency: "high" | "normal" | "low";
+  confidence: number;
+};
+
 export type PendingObligationRow = {
   id: string;
   thread_id: string;
+  thread_external_id: string;
+  thread_last_message_at: string;
   contact_id: string;
   kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
   rank: number;
@@ -301,13 +481,31 @@ export type PendingObligationRow = {
   subject: string;
   contact_display_name: string;
   contact_account_name: string | null;
+  contact_address: string;
+  has_open_deal: boolean | null;
+  open_deal_value: number | null;
+  last_meeting_at: string | null;
+  /** Present when the agent has judged this thread in its current state. */
+  assessment: ThreadAssessment | null;
 };
 
-/** The ranked list the UI shows. Most urgent first. */
+const URGENCY_WEIGHT: Record<ThreadAssessment["urgency"], number> = { high: 2, normal: 1, low: 0 };
+
+/**
+ * The ranked list the UI shows. Most urgent first.
+ *
+ * With `agent: false` (the default) this is the detector's ranking and nothing
+ * else — the assessment rides along for display but decides nothing. With
+ * `agent: true` the agent's judgment narrows and reorders: an item it judged
+ * not owed is left out, and urgency orders within the detector's rank. An
+ * item with no judgment (never assessed, or the model failed) keeps its
+ * arithmetic place. Switching the flag switches the list; nothing is lost.
+ */
 export async function listPendingObligations(
   sql: Sql,
   ctx: UserContext,
   limit = 50,
+  opts: { agent?: boolean } = {},
 ): Promise<PendingObligationRow[]> {
   return withUser(sql, ctx, async (tx) => {
     const d = db(tx);
@@ -315,6 +513,8 @@ export async function listPendingObligations(
       .select({
         id: schema.obligations.id,
         thread_id: schema.obligations.thread_id,
+        thread_external_id: schema.threads.external_id,
+        thread_last_message_at: schema.threads.last_message_at,
         contact_id: schema.obligations.contact_id,
         kind: schema.obligations.kind,
         rank: schema.obligations.rank,
@@ -323,18 +523,106 @@ export async function listPendingObligations(
         subject: schema.threads.subject,
         contact_display_name: schema.contacts.display_name,
         contact_account_name: schema.contacts.account_name,
+        contact_address: schema.contacts.external_id,
+        has_open_deal: schema.contacts.has_open_deal,
+        open_deal_value: schema.contacts.open_deal_value,
+        last_meeting_at: schema.contacts.last_meeting_at,
+        assessment: schema.thread_assessments.assessment,
+        assessed_last_message_at: schema.thread_assessments.assessed_last_message_at,
       })
       .from(schema.obligations)
       .innerJoin(schema.threads, eq(schema.threads.id, schema.obligations.thread_id))
       .innerJoin(schema.contacts, eq(schema.contacts.id, schema.obligations.contact_id))
+      .leftJoin(
+        schema.thread_assessments,
+        eq(schema.thread_assessments.thread_id, schema.obligations.thread_id),
+      )
       .where(and(eq(schema.obligations.outcome, "pending")))
-      .orderBy(desc(schema.obligations.rank), schema.obligations.thread_id)
-      .limit(limit);
-    return rows.map((r) => ({
-      ...r,
-      rank: Number(r.rank),
-      detected_at: new Date(r.detected_at).toISOString(),
-    }));
+      .orderBy(desc(schema.obligations.rank), schema.obligations.thread_id);
+
+    const mapped = rows.map((r) => {
+      // A judgment describes one thread state; a newer message makes it stale
+      // and it is not shown (nor trusted) until the agent looks again.
+      const fresh =
+        r.assessment !== null &&
+        r.assessed_last_message_at !== null &&
+        new Date(r.assessed_last_message_at).getTime() >=
+          new Date(r.thread_last_message_at).getTime();
+      return {
+        id: r.id,
+        thread_id: r.thread_id,
+        thread_external_id: r.thread_external_id,
+        thread_last_message_at: new Date(r.thread_last_message_at).toISOString(),
+        contact_id: r.contact_id,
+        kind: r.kind,
+        rank: Number(r.rank),
+        reason: r.reason,
+        detected_at: new Date(r.detected_at).toISOString(),
+        subject: r.subject,
+        contact_display_name: r.contact_display_name,
+        contact_account_name: r.contact_account_name,
+        contact_address: r.contact_address,
+        has_open_deal: r.has_open_deal,
+        open_deal_value: r.open_deal_value !== null ? Number(r.open_deal_value) : null,
+        last_meeting_at: r.last_meeting_at ? new Date(r.last_meeting_at).toISOString() : null,
+        assessment: fresh ? (r.assessment as ThreadAssessment) : null,
+      };
+    });
+
+    if (!opts.agent) return mapped.slice(0, limit);
+    return mapped
+      .filter((o) => o.assessment === null || o.assessment.owed)
+      .sort((a, b) => {
+        const kindA = kindWeight(a.kind);
+        const kindB = kindWeight(b.kind);
+        if (kindA !== kindB) return kindB - kindA;
+        const ua = a.assessment ? URGENCY_WEIGHT[a.assessment.urgency] : 1;
+        const ub = b.assessment ? URGENCY_WEIGHT[b.assessment.urgency] : 1;
+        if (ua !== ub) return ub - ua;
+        return b.rank - a.rank || a.thread_id.localeCompare(b.thread_id);
+      })
+      .slice(0, limit);
+  });
+}
+
+/** The detector's bands, so urgency reorders within a band and never across one. */
+function kindWeight(kind: PendingObligationRow["kind"]): number {
+  return kind === "awaiting_you" ? 3 : kind === "unsent_followup" ? 2 : 1;
+}
+
+/** Records the agent's judgment for the thread state it was made against. */
+export async function upsertThreadAssessment(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    thread_id: string;
+    assessed_last_message_at: string;
+    assessment: ThreadAssessment;
+    model_alias: string;
+  },
+): Promise<void> {
+  await withUser(sql, ctx, async (tx) => {
+    await db(tx)
+      .insert(schema.thread_assessments)
+      .values({
+        id: uuidv7(),
+        organization_id: ctx.organizationId,
+        owner_user_id: ctx.userId,
+        thread_id: input.thread_id,
+        assessed_last_message_at: input.assessed_last_message_at,
+        assessment: input.assessment,
+        model_alias: input.model_alias,
+      })
+      .onConflictDoUpdate({
+        target: schema.thread_assessments.thread_id,
+        set: {
+          assessed_last_message_at: input.assessed_last_message_at,
+          assessment: input.assessment,
+          model_alias: input.model_alias,
+          assessed_at: rawSql`now()`,
+          updated_at: rawSql`now()`,
+        },
+      });
   });
 }
 

@@ -126,6 +126,12 @@ export function registerConnectorRoutes(
 
     const verifier = pkceStore.get(payload.nonce);
     pkceStore.delete(payload.nonce); // single use
+    // A PKCE provider with no verifier on file means this state was already
+    // spent (or minted by another process). Refuse rather than exchange
+    // without the proof.
+    if (getProvider(provider)!.supports_pkce && !verifier) {
+      return reply.redirect(landing(env, provider, { error: "state_reused" }), 303);
+    }
 
     const result = await exchangeCode(
       {
@@ -141,7 +147,10 @@ export function registerConnectorRoutes(
       deps.transport ?? realTransport(),
     );
     if (!result.ok) {
-      return reply.status(502).send({ status: 502, detail: result.error });
+      // The browser is mid-flow: land it back on the web app with a reason
+      // it can show, never on a JSON error page. The reason names the step,
+      // not the token.
+      return reply.redirect(landing(env, provider, { error: "exchange_failed" }), 303);
     }
 
     // Envelope-encrypt and store; the plaintext token dies with this scope.
@@ -184,8 +193,11 @@ export function registerConnectorRoutes(
         last_verified_at: new Date().toISOString(),
       },
     );
-    // Response carries STATUS ONLY — no token.
-    return { connected: true, connector: view };
+    // The browser arrived here from the provider's consent screen; send it
+    // home to the Connections page. The URL carries the provider and nothing
+    // else — no token, no id.
+    void view;
+    return reply.redirect(landing(env, provider, { connected: true }), 303);
   });
 
   app.post("/v1/connectors/:provider/disconnect", async (req, reply) => {
@@ -229,4 +241,17 @@ function clientSecretFor(provider: string, env: ServerEnv): string | undefined {
   if (provider === "salesforce") return env.SALESFORCE_CLIENT_SECRET;
   if (provider.startsWith("google") || provider === "gmail") return env.GOOGLE_CLIENT_SECRET;
   return undefined;
+}
+
+/** Where a browser lands after an OAuth round-trip: the web app's Connections page. */
+export function landing(
+  env: ServerEnv,
+  provider: string,
+  outcome: { connected: true } | { error: string },
+): string {
+  const url = new URL("/connections", env.WEB_BASE_URL);
+  url.searchParams.set("provider", provider);
+  if ("connected" in outcome) url.searchParams.set("connected", "1");
+  else url.searchParams.set("error", outcome.error);
+  return url.toString();
 }

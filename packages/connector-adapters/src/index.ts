@@ -26,11 +26,15 @@ export {
   isSelf,
   projectThread,
   projectThreads,
+  projectContent,
   type GmailHeader,
   type GmailMessage,
   type GmailThread,
   type Participant,
   type ProjectedThread,
+  type ProjectedMessage,
+  type ContentMessage,
+  type ThreadContent,
 } from "./gmail-project.js";
 export {
   syncGmailThreads,
@@ -51,3 +55,18 @@ export {
   SF_DEAL_QUERY_CHUNK,
   type SalesforceDealSourceConfig,
 } from "./salesforce-deals.js";
+export {
+  bodyText,
+  CONTENT_MAX_CHARS,
+  CONTENT_MAX_MESSAGES,
+  STORED_MAX_CHARS,
+  stripHtml,
+  stripQuoted,
+  type GmailMessageFull,
+  type GmailThreadFull,
+} from "./gmail-body.js";
+export {
+  gmailContentReader,
+  type GmailContentConfig,
+  type ThreadContentReader,
+} from "./gmail-content.js";

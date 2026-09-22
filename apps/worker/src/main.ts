@@ -10,9 +10,11 @@ import {
 } from "@maman/agent-runtime";
 import {
   fetchTransport,
+  gmailContentReader,
   MemoryIdempotencyStore,
   realAdapterRegistry,
 } from "@maman/connector-adapters";
+import { createModelProvider } from "@maman/model-provider";
 import { createDbClient } from "@maman/db";
 import { createConnectorTokenTransport } from "@maman/connector-auth";
 import { createActivities, type PersistenceSink } from "./activities.js";
@@ -124,22 +126,33 @@ const sink: PersistenceSink = {
 
 /** The sweep's activities: the on-demand sync job, run per person from the schedule. */
 function buildSweepActivities() {
+  const credentials = createUserVaultCredentialProvider({
+    sql,
+    masterKey,
+    transport: createConnectorTokenTransport(),
+    clientCredentials: (provider) =>
+      provider === "gmail" && env.GOOGLE_CLIENT_ID
+        ? {
+            client_id: env.GOOGLE_CLIENT_ID,
+            ...(env.GOOGLE_CLIENT_SECRET ? { client_secret: env.GOOGLE_CLIENT_SECRET } : {}),
+          }
+        : null,
+  });
   return createSweepActivities({
     sql,
-    credentials: createUserVaultCredentialProvider({
-      sql,
-      masterKey,
-      transport: createConnectorTokenTransport(),
-      clientCredentials: (provider) =>
-        provider === "gmail" && env.GOOGLE_CLIENT_ID
-          ? {
-              client_id: env.GOOGLE_CLIENT_ID,
-              ...(env.GOOGLE_CLIENT_SECRET ? { client_secret: env.GOOGLE_CLIENT_SECRET } : {}),
-            }
-          : null,
-    }),
+    credentials,
     transport: fetchTransport,
     now: () => new Date(),
+    contentKey: masterKey,
+    // The agent pass, only when switched on (AGENT_MODE=assist).
+    ...(env.AGENT_MODE === "assist"
+      ? {
+          agent: {
+            provider: createModelProvider(env),
+            content: gmailContentReader({ credentials, transport: fetchTransport }),
+          },
+        }
+      : {}),
     // The organization's CRM (org vault), asked about each person's contacts.
     deals: resolveDealSource({
       sql,

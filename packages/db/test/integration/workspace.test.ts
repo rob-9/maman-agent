@@ -9,6 +9,11 @@ import {
   loadDetectionInputs,
   replacePendingObligations,
   upsertSyncedThreads,
+  upsertThreadAssessment,
+  getThreadMessages,
+  listContactThreads,
+  listRecentOutboundMessages,
+  listThreadHistoryIds,
   type SyncedThread,
 } from "../../src/workspace.js";
 import { startTestDb, type TestDb } from "./setup.js";
@@ -67,7 +72,7 @@ describe("workspace repository", () => {
       connection_id: connId,
       threads: [T(), T({ external_id: "gm-2", contact: { address: "carol@client.com" } })],
     });
-    expect(first).toEqual({ contacts: 2, threads: 2 });
+    expect(first).toEqual({ contacts: 2, threads: 2, messages: 0 });
 
     // Same input again: nothing duplicated.
     await upsertSyncedThreads(db.client.sql, ctx, {
@@ -358,5 +363,318 @@ describe("deal state from a CRM", () => {
     });
     expect(await stateOf("ann@acme.com", theirs)).toMatchObject({ has_open_deal: null });
     expect(await listContactAddresses(db.client.sql, theirs)).toEqual(["ann@acme.com"]);
+  });
+});
+
+describe("the agent's judgment beside the arithmetic", () => {
+  const sql = () => db.client.sql;
+  const threadIdOf = async (external: string) =>
+    (
+      await withUser(sql(), ctx, (tx) => tx`SELECT id FROM threads WHERE external_id = ${external}`)
+    )[0]!["id"] as string;
+  const judged = (owed: boolean, urgency: "high" | "normal" | "low") => ({
+    owed,
+    ask: owed ? "the contract" : "",
+    summary: owed ? "They are waiting on the contract." : "Nothing is owed.",
+    urgency,
+    confidence: 0.8,
+  });
+  let t1 = "",
+    t2 = "",
+    t3 = "",
+    t4 = "";
+
+  it("is stored per thread state and comes back on the list without changing the arithmetic order", async () => {
+    await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "ag-1",
+          subject: "One",
+          last_direction: "inbound",
+          contact: { address: "one@x.com" },
+          last_message_at: "2026-09-10T09:00:00.000Z",
+        }),
+        T({
+          external_id: "ag-2",
+          subject: "Two",
+          last_direction: "inbound",
+          contact: { address: "two@x.com" },
+          last_message_at: "2026-09-11T09:00:00.000Z",
+        }),
+        T({
+          external_id: "ag-4",
+          subject: "Four",
+          last_direction: "inbound",
+          contact: { address: "four@x.com" },
+          last_message_at: "2026-09-12T09:00:00.000Z",
+        }),
+        T({
+          external_id: "ag-3",
+          subject: "Three",
+          last_direction: "outbound",
+          contact: { address: "three@x.com" },
+          last_message_at: "2026-09-05T09:00:00.000Z",
+        }),
+      ],
+    });
+    t1 = await threadIdOf("ag-1");
+    t2 = await threadIdOf("ag-2");
+    t4 = await threadIdOf("ag-4");
+    t3 = await threadIdOf("ag-3");
+    const inputs = await loadDetectionInputs(sql(), ctx);
+    const contactOf = (tid: string) => inputs.threads.find((t) => t.thread_id === tid)!.contact_id;
+    const reason = (days: number) => ({ days_elapsed: days, threshold_days: 2 });
+    await replacePendingObligations(
+      sql(),
+      ctx,
+      [
+        {
+          thread_id: t1,
+          contact_id: contactOf(t1),
+          kind: "awaiting_you",
+          rank: 105,
+          reason: reason(11),
+        },
+        {
+          thread_id: t2,
+          contact_id: contactOf(t2),
+          kind: "awaiting_you",
+          rank: 104,
+          reason: reason(10),
+        },
+        {
+          thread_id: t4,
+          contact_id: contactOf(t4),
+          kind: "awaiting_you",
+          rank: 103,
+          reason: reason(9),
+        },
+        {
+          thread_id: t3,
+          contact_id: contactOf(t3),
+          kind: "awaiting_them",
+          rank: 40,
+          reason: reason(16),
+        },
+      ],
+      new Date("2026-09-21T12:00:00.000Z"),
+    );
+    const at = (tid: string) => inputs.threads.find((t) => t.thread_id === tid)!.last_message_at;
+    await upsertThreadAssessment(sql(), ctx, {
+      thread_id: t1,
+      assessed_last_message_at: at(t1),
+      assessment: judged(false, "low"),
+      model_alias: "demo",
+    });
+    await upsertThreadAssessment(sql(), ctx, {
+      thread_id: t2,
+      assessed_last_message_at: at(t2),
+      assessment: judged(true, "normal"),
+      model_alias: "demo",
+    });
+    await upsertThreadAssessment(sql(), ctx, {
+      thread_id: t4,
+      assessed_last_message_at: at(t4),
+      assessment: judged(true, "high"),
+      model_alias: "demo",
+    });
+    await upsertThreadAssessment(sql(), ctx, {
+      thread_id: t3,
+      assessed_last_message_at: at(t3),
+      assessment: judged(true, "low"),
+      model_alias: "demo",
+    });
+
+    const off = await listPendingObligations(sql(), ctx, 50);
+    expect(off.map((o) => o.thread_id)).toEqual([t1, t2, t4, t3]);
+    expect(off[0]!.assessment).toMatchObject({ owed: false });
+    expect(off[1]!.assessment).toMatchObject({ owed: true, urgency: "normal" });
+  });
+
+  it("with the agent on: not-owed is hidden, urgency reorders within a band, never across one", async () => {
+    const on = await listPendingObligations(sql(), ctx, 50, { agent: true });
+    expect(on.map((o) => o.thread_id)).toEqual([t4, t2, t3]);
+  });
+
+  it("a judgment goes stale the moment the thread moves, and the item keeps its arithmetic place", async () => {
+    await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "ag-1",
+          subject: "One",
+          last_direction: "inbound",
+          contact: { address: "one@x.com" },
+          last_message_at: "2026-09-20T09:00:00.000Z",
+          message_count: 3,
+        }),
+      ],
+    });
+    const on = await listPendingObligations(sql(), ctx, 50, { agent: true });
+    // t1 was "not owed" for the OLD state; now unjudged, so it shows again.
+    // Unjudged counts as normal urgency, so the judged-high t4 still leads it.
+    expect(on.map((o) => o.thread_id)).toEqual([t4, t1, t2, t3]);
+    expect(on[1]!.assessment).toBeNull();
+    // Judging it again replaces the row, no duplicate.
+    await upsertThreadAssessment(sql(), ctx, {
+      thread_id: t1,
+      assessed_last_message_at: "2026-09-20T09:00:00.000Z",
+      assessment: judged(true, "high"),
+      model_alias: "demo",
+    });
+    const rows = await withUser(
+      sql(),
+      ctx,
+      (tx) => tx`SELECT count(*)::int AS n FROM thread_assessments WHERE thread_id = ${t1}`,
+    );
+    expect(rows[0]!["n"]).toBe(1);
+    expect(
+      (await listPendingObligations(sql(), ctx, 50, { agent: true }))[0]!.assessment,
+    ).toMatchObject({ urgency: "high" });
+  });
+
+  it("a colleague reads none of it", async () => {
+    const other = uuidv7();
+    await globalCreateUser(sql(), {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "peer2@co.example",
+      display_name: "Peer",
+    });
+    await addMembership(sql(), { organizationId: orgId }, { user_id: other, role: "member" });
+    const theirs = { organizationId: orgId, userId: other };
+    expect(
+      await withUser(sql(), theirs, (tx) => tx`SELECT count(*)::int AS n FROM thread_assessments`),
+    ).toEqual([{ n: 0 }]);
+  });
+});
+
+describe("stored messages", () => {
+  const sql = () => db.client.sql;
+  const ct = (s: string) => Buffer.from(`enc:${s}`);
+  it("stores content beside the thread, replaces a message seen again, and reports history ids", async () => {
+    const r = await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-msg",
+          history_id: "h-1",
+          contact: { address: "pat@x.com" },
+          messages: [
+            {
+              external_id: "m1",
+              from_address: "me@co.example",
+              direction: "outbound",
+              sent_at: "2026-09-10T09:00:00.000Z",
+              body_ciphertext: ct("first, a long enough outbound message to count as writing"),
+              body_chars: 120,
+            },
+            {
+              external_id: "m2",
+              from_address: "pat@x.com",
+              from_display_name: "Pat",
+              direction: "inbound",
+              sent_at: "2026-09-11T09:00:00.000Z",
+              body_ciphertext: ct("reply"),
+              body_chars: 5,
+            },
+          ],
+        }),
+      ],
+    });
+    expect(r).toMatchObject({ threads: 1, messages: 2 });
+    expect(await listThreadHistoryIds(sql(), ctx, connId)).toEqual(new Map([["gm-msg", "h-1"]]));
+    const tid = (
+      await withUser(sql(), ctx, (tx) => tx`SELECT id FROM threads WHERE external_id = 'gm-msg'`)
+    )[0]!["id"] as string;
+    const rows = await getThreadMessages(sql(), ctx, tid);
+    expect(
+      rows.map((m) => [
+        m.external_id,
+        m.direction,
+        m.from_display_name,
+        Buffer.from(m.body_ciphertext).toString(),
+      ]),
+    ).toEqual([
+      ["m1", "outbound", null, "enc:first, a long enough outbound message to count as writing"],
+      ["m2", "inbound", "Pat", "enc:reply"],
+    ]);
+    await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-msg",
+          history_id: "h-2",
+          contact: { address: "pat@x.com" },
+          messages: [
+            {
+              external_id: "m2",
+              from_address: "pat@x.com",
+              direction: "inbound",
+              sent_at: "2026-09-11T09:00:00.000Z",
+              body_ciphertext: ct("reply, corrected"),
+              body_chars: 16,
+            },
+          ],
+        }),
+      ],
+    });
+    const again = await getThreadMessages(sql(), ctx, tid);
+    expect(again).toHaveLength(2);
+    expect(Buffer.from(again[1]!.body_ciphertext).toString()).toBe("enc:reply, corrected");
+    expect((await listThreadHistoryIds(sql(), ctx, connId)).get("gm-msg")).toBe("h-2");
+  });
+
+  it("the relationship so far excludes the thread being judged; the voice sample is outbound and substantial", async () => {
+    await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-msg-2",
+          subject: "Earlier",
+          last_message_at: "2026-08-01T09:00:00.000Z",
+          contact: { address: "pat@x.com" },
+        }),
+      ],
+    });
+    const inputs = await loadDetectionInputs(sql(), ctx);
+    const current = inputs.threads.find(
+      (t) =>
+        t.subject === "Pricing" &&
+        t.contact_id === inputs.threads.find((x) => x.subject === "Earlier")!.contact_id,
+    )!;
+    const history = await listContactThreads(sql(), ctx, current.contact_id, {
+      exclude_thread_id: current.thread_id,
+    });
+    expect(history.map((h) => h.subject)).toEqual(["Earlier"]);
+    const voice = await listRecentOutboundMessages(sql(), ctx, { min_chars: 80 });
+    expect(voice.map((m) => m.external_id)).toEqual(["m1"]);
+  });
+
+  it("a colleague reads no messages, and the thread's messages go with the thread", async () => {
+    const other = uuidv7();
+    await globalCreateUser(sql(), {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "peer3@co.example",
+      display_name: "Peer",
+    });
+    await addMembership(sql(), { organizationId: orgId }, { user_id: other, role: "member" });
+    expect(
+      await withUser(
+        sql(),
+        { organizationId: orgId, userId: other },
+        (tx) => tx`SELECT count(*)::int AS n FROM messages`,
+      ),
+    ).toEqual([{ n: 0 }]);
+    await withUser(sql(), ctx, (tx) => tx`DELETE FROM threads WHERE external_id = 'gm-msg'`);
+    expect(
+      await withUser(
+        sql(),
+        ctx,
+        (tx) => tx`SELECT count(*)::int AS n FROM messages WHERE external_id IN ('m1','m2')`,
+      ),
+    ).toEqual([{ n: 0 }]);
   });
 });

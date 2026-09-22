@@ -11,6 +11,16 @@ export {
   type CompileInput,
 } from "./provider.js";
 export { DeterministicModelProvider } from "./deterministic.js";
+export {
+  assessDeterministically,
+  assessmentInputSchema,
+  assessmentMessageSchema,
+  assessmentOutputSchema,
+  lastQuestion,
+  type AssessmentInput,
+  type AssessmentMessage,
+  type AssessmentOutput,
+} from "./assessment.js";
 export { DemoModelProvider } from "./demo.js";
 export { AnthropicModelProvider, type AnthropicProviderConfig } from "./anthropic.js";
 export {

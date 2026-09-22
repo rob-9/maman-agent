@@ -8,6 +8,7 @@ import {
   applyDealAnswer,
   getUserConnection,
   listContactAddresses,
+  listThreadHistoryIds,
   loadDetectionInputs,
   markUserConnectionSync,
   replacePendingObligations,
@@ -16,6 +17,8 @@ import {
 } from "@maman/db";
 import { detectObligations, type DetectionConfig } from "@maman/obligation-engine";
 import type { DealSourceResolver } from "./deal-source.js";
+import { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
+import { toSyncedMessage } from "./content.js";
 
 /**
  * THE L1 VERTICAL SLICE: mailbox → rows → detector → ranked obligations.
@@ -35,6 +38,8 @@ export type GmailSyncJobDeps = {
   credentials: UserCredentialProvider;
   transport: HttpTransport;
   now: () => Date;
+  /** Encrypts stored message bodies to the person (content.ts). */
+  contentKey: Buffer;
   /**
    * Finds the organization's CRM, when one is connected. Absent, or resolving
    * to nothing → deal state stays unknown and the list still works (0009).
@@ -43,6 +48,12 @@ export type GmailSyncJobDeps = {
    * informed.
    */
   deals?: DealSourceResolver | undefined;
+  /**
+   * The agent pass, when AGENT_MODE=assist. Absent → the list is the
+   * deterministic ranking. Present → runs after detection over the top
+   * candidates; see assess.ts for what it may and may not do.
+   */
+  agent?: AgentDeps | undefined;
 };
 
 export type DealStepResult =
@@ -56,11 +67,15 @@ export type GmailSyncJobResult =
       connection_id: string;
       listed: number;
       truncated: boolean;
+      /** Listed but unchanged since last sync: not fetched, not rewritten. */
+      unchanged: number;
       contacts_upserted: number;
       threads_upserted: number;
+      messages_upserted: number;
       obligations_written: number;
       obligations_kept_decided: number;
       deals: DealStepResult;
+      agent: AgentPassResult | null;
     }
   | { ok: false; reason: "no_connection" | "sync_failed"; error?: string };
 
@@ -76,12 +91,16 @@ export async function runGmailSyncJob(
   const conn = await getUserConnection(deps.sql, ctx, "gmail");
   if (!conn) return { ok: false, reason: "no_connection" };
 
+  // What we already hold, so an unchanged thread costs no fetch.
+  const known = await listThreadHistoryIds(deps.sql, ctx, conn.id);
+
   let synced;
   try {
     synced = await syncGmailThreads(
       { credentials: deps.credentials, transport: deps.transport },
       { organization_id: ctx.organizationId, user_id: ctx.userId },
       {
+        known,
         ...(options.max_threads !== undefined ? { max_threads: options.max_threads } : {}),
         ...(options.newer_than_days !== undefined
           ? { newer_than_days: options.newer_than_days }
@@ -97,9 +116,13 @@ export async function runGmailSyncJob(
     return { ok: false, reason: "sync_failed", error };
   }
 
+  // Bodies are encrypted to the person before they reach the database.
   const upserted = await upsertSyncedThreads(deps.sql, ctx, {
     connection_id: conn.id,
-    threads: synced.threads,
+    threads: synced.threads.map((t) => ({
+      ...t,
+      messages: t.messages.map((m) => toSyncedMessage(m, deps.contentKey, ctx)),
+    })),
   });
 
   // The CRM's answer, if there is a CRM. A CRM that is down must not take the
@@ -117,6 +140,16 @@ export async function runGmailSyncJob(
   });
   const replaced = await replacePendingObligations(deps.sql, ctx, detected, now);
 
+  // The agent looks at what the detector found, after the rows are in place
+  // so its judgments key to real obligations. Never before, never instead.
+  const agent = deps.agent
+    ? await runAgentPass(
+        { ...deps.agent, sql: deps.sql, contentKey: deps.contentKey },
+        ctx,
+        synced.self_addresses,
+      )
+    : null;
+
   await markUserConnectionSync(deps.sql, ctx, conn.id, { ok: true, at: now });
 
   return {
@@ -124,11 +157,14 @@ export async function runGmailSyncJob(
     connection_id: conn.id,
     listed: synced.listed,
     truncated: synced.truncated,
+    unchanged: synced.unchanged.length,
     contacts_upserted: upserted.contacts,
     threads_upserted: upserted.threads,
+    messages_upserted: upserted.messages,
     obligations_written: replaced.written,
     obligations_kept_decided: replaced.kept_decided,
     deals,
+    agent,
   };
 }
 

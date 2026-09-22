@@ -79,13 +79,24 @@ const as = (userId: string) => ({
   "x-dev-role": "member",
 });
 
-/** Google's token endpoint, scripted. */
-const tokenTransport: TokenTransport = async () => ({
-  status: 200,
-  body: { access_token: "live-token", refresh_token: "live-refresh", expires_in: 3600 },
-});
+/** Google's token endpoint, scripted. Flip `tokenEndpointDown` to refuse the exchange. */
+let tokenEndpointDown = false;
+const tokenTransport: TokenTransport = async () =>
+  tokenEndpointDown
+    ? { status: 500, body: { error: "server_error" } }
+    : {
+        status: 200,
+        body: { access_token: "live-token", refresh_token: "live-refresh", expires_in: 3600 },
+      };
 
-function gmailThread(id: string, from: string, to: string, whenMs: string, subject: string) {
+function gmailThread(
+  id: string,
+  from: string,
+  to: string,
+  whenMs: string,
+  subject: string,
+  text?: string,
+) {
   return {
     id,
     messages: [
@@ -98,6 +109,9 @@ function gmailThread(id: string, from: string, to: string, whenMs: string, subje
             { name: "To", value: to },
             { name: "Subject", value: subject },
           ],
+          ...(text
+            ? { mimeType: "text/plain", body: { data: Buffer.from(text).toString("base64url") } }
+            : {}),
         },
       },
     ],
@@ -110,6 +124,7 @@ const MAILBOX: Record<string, unknown> = {
     "alice@co.example",
     ago(4),
     "Enterprise pricing",
+    "Thanks Alex. Can you confirm pricing for 60 seats? We need it by Friday.",
   ),
   waiting: gmailThread("waiting", "alice@co.example", "bob@client.com", ago(9), "Proposal"),
 };
@@ -210,9 +225,9 @@ describe("/v1/me — the demo path", () => {
     expect(res.statusCode).toBe(200);
     const url = new URL(res.json().authorization_url as string);
     expect(url.hostname).toBe("accounts.google.com");
-    // The scope requested is metadata + compose. NEVER send.
+    // The scope requested is read-only mail + compose. NEVER send.
     const scope = url.searchParams.get("scope") ?? "";
-    expect(scope).toContain("gmail.metadata");
+    expect(scope).toContain("gmail.readonly");
     expect(scope).toContain("gmail.compose");
     expect(scope).not.toContain("gmail.send");
     expect(url.searchParams.get("code_challenge")).toBeTruthy();
@@ -228,14 +243,17 @@ describe("/v1/me — the demo path", () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it("callback exchanges the code, stores a USER-bound envelope, and returns status only", async () => {
+  it("callback exchanges the code, stores a USER-bound envelope, and sends the browser home", async () => {
     const res = await app.inject({
       method: "GET",
       url: `/v1/me/connections/gmail/callback?code=abc&state=${encodeURIComponent(state)}`,
     });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ connected: true, provider: "gmail" });
-    // No token anywhere in the response.
+    // A browser arrives here from Google; it leaves for the Connections page
+    // with the provider and the outcome in the URL — no token, no id.
+    expect(res.statusCode).toBe(303);
+    expect(res.headers["location"]).toBe(
+      "http://localhost:3000/connections?provider=gmail&connected=1",
+    );
     expect(res.body).not.toContain("live-token");
     expect(res.body).not.toContain("live-refresh");
 
@@ -259,15 +277,43 @@ describe("/v1/me — the demo path", () => {
     );
   });
 
-  it("a replayed state is refused — single use", async () => {
+  it("when Google refuses the code exchange, the browser lands home with a reason, nothing stored", async () => {
+    const auth = await app.inject({
+      method: "POST",
+      url: "/v1/me/connections/gmail/authorize",
+      headers: as(bob),
+    });
+    const freshState = new URL(auth.json().authorization_url as string).searchParams.get("state")!;
+    tokenEndpointDown = true;
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: `/v1/me/connections/gmail/callback?code=abc&state=${encodeURIComponent(freshState)}`,
+      });
+      expect(res.statusCode).toBe(303);
+      expect(res.headers["location"]).toBe(
+        "http://localhost:3000/connections?provider=gmail&error=exchange_failed",
+      );
+    } finally {
+      tokenEndpointDown = false;
+    }
+    const bobs = await withUser(
+      client.sql,
+      { organizationId: orgId, userId: bob },
+      (tx) => tx`SELECT count(*)::int AS n FROM user_connections`,
+    );
+    expect(bobs[0]!["n"]).toBe(0);
+  });
+
+  it("a replayed state is refused — single use — and stores nothing", async () => {
     const res = await app.inject({
       method: "GET",
       url: `/v1/me/connections/gmail/callback?code=abc&state=${encodeURIComponent(state)}`,
     });
-    // The nonce was consumed; PKCE verifier is gone. The exchange still runs
-    // against the scripted endpoint here, so what must hold is that no SECOND
-    // connection appears.
-    expect([200, 400, 502]).toContain(res.statusCode);
+    expect(res.statusCode).toBe(303);
+    expect(res.headers["location"]).toBe(
+      "http://localhost:3000/connections?provider=gmail&error=state_reused",
+    );
     const rows = await withUser(
       client.sql,
       { organizationId: orgId, userId: alice },
@@ -532,5 +578,71 @@ describe("with the organization's Salesforce connected — the deal step over HT
     // and the CRM is never asked on his behalf about anyone.
     expect(res.statusCode).toBe(409);
     expect(crmRequests).toHaveLength(0);
+  });
+});
+
+describe("AGENT_MODE=assist — the agent pass over HTTP", () => {
+  let agentApp: FastifyInstance;
+  beforeAll(async () => {
+    agentApp = buildServer({
+      env: { ...serverEnv, AGENT_MODE: "assist" },
+      sql: client.sql,
+      connectorTransport: tokenTransport,
+      gmailTransport,
+      crmTransport,
+      now: () => NOW,
+    });
+    await agentApp.ready();
+    // Earlier tests drafted and snoozed Alice's items; the agent should see both pending.
+    await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`UPDATE obligations SET outcome = 'pending', snoozed_until = NULL`,
+    );
+  });
+  afterAll(async () => {
+    await agentApp?.close();
+  });
+
+  it("sync reads the candidate threads in full and stores a judgment; the list leads with it", async () => {
+    gmailRequests.length = 0;
+    const res = await agentApp.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().agent).toMatchObject({
+      considered: 2,
+      assessed: 2,
+      failed: 0,
+      model_alias: "demo",
+    });
+    // The sync fetched both threads in full and stored them encrypted; the
+    // agent read the store, so the pass added no Gmail requests.
+    const fetches = gmailRequests.filter((r) => /\/threads\/[^?]+\?/.test(r.url));
+    expect(fetches).toHaveLength(2);
+    expect(fetches.every((r) => r.method === "GET" && r.url.includes("format=full"))).toBe(true);
+
+    const list = await agentApp.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: as(alice),
+    });
+    expect(list.json().agent_mode).toBe("assist");
+    const pricing = (list.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["subject"] === "Enterprise pricing",
+    )!;
+    expect(pricing["assessment"]).toMatchObject({
+      owed: true,
+      ask: "Can you confirm pricing for 60 seats?",
+      urgency: "high",
+    });
+  });
+
+  it("the same data, with the agent off, is the deterministic list and says so", async () => {
+    const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
+    expect(list.json().agent_mode).toBe("off");
+    // The judgment rides along for display but decides nothing here.
+    const subjects = (list.json().obligations as Array<Record<string, unknown>>).map(
+      (o) => o["subject"],
+    );
+    expect(subjects).toContain("Enterprise pricing");
   });
 });

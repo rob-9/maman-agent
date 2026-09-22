@@ -11,7 +11,7 @@ export default function PrivacyPage() {
         </ul>
       </div>
       <div className="card" style={{ marginTop: 16 }}>
-        <h3>Never visible — these endpoints do not exist</h3>
+        <h3>Never visible. These endpoints do not exist</h3>
         <ul className="muted">
           <li>Any employee&apos;s raw workflow events or event history</li>
           <li>Screen content or screen replay</li>

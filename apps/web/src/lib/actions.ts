@@ -51,3 +51,16 @@ export async function signInAction(): Promise<void> {
 export async function signOutAction(): Promise<void> {
   await endSession();
 }
+
+/** Connects a CRM for the whole organization. An org-level connection, not a personal one. */
+export async function connectOrgAction(provider: string): Promise<void> {
+  const res = await me.connectOrg(provider);
+  if (!res.ok) throw new Error(`could not start ${provider} connection (${res.status})`);
+  redirect(res.data.authorization_url);
+}
+
+export async function disconnectOrgAction(provider: string): Promise<void> {
+  await me.disconnectOrg(provider);
+  revalidatePath("/connections");
+  revalidatePath("/");
+}

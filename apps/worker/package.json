@@ -32,7 +32,8 @@
     "postgres": "^3.4.5",
     "zod": "^3.24.1",
     "@maman/connector-adapters": "workspace:*",
-    "@maman/sync": "workspace:*"
+    "@maman/sync": "workspace:*",
+    "@maman/model-provider": "workspace:*"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",

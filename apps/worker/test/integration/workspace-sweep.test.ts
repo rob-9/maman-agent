@@ -170,6 +170,7 @@ async function createWorker() {
       }),
       transport,
       now: () => NOW,
+      contentKey: master,
     }),
   });
 }

@@ -47,9 +47,11 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     token_endpoint: "https://oauth2.googleapis.com/token",
     revocation_endpoint: "https://oauth2.googleapis.com/revoke",
     supports_pkce: true,
-    // metadata + compose (drafts). NEVER gmail.send.
+    // Read-only mail + compose (drafts). NEVER gmail.send. Detection reads
+    // headers only; the agent reads the body of a candidate thread at
+    // judgment time and never stores it.
     scopes: [
-      "https://www.googleapis.com/auth/gmail.metadata",
+      "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
     ],
     supports_enterprise_install: true,

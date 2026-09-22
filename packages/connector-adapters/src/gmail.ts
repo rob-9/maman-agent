@@ -13,12 +13,11 @@ import { projectThreads, type GmailThread, type ProjectedThread } from "./gmail-
  * everything that needs a brain lives in gmail-project.ts and is tested
  * without one.
  *
- * READ-ONLY, METADATA-ONLY. Every request is a GET, and thread fetches ask for
- * `format=metadata` with an explicit header allowlist, so the API returns
- * headers and never a body. That is not an optimisation: the connector holds
- * `gmail.metadata`, and a `format=full` request would be refused by Google.
- * The scope and the request agree, and both keep message content out of the
- * database.
+ * READ-ONLY. Every request is a GET. Threads are fetched in full, because
+ * the conversation is the agent's input, and only when they have changed:
+ * Gmail's per-thread historyId is compared with what the caller already
+ * holds, so an unchanged thread costs one list entry and no fetch. That is
+ * what makes a full-content sync affordable every fifteen minutes.
  *
  * Per-USER credentials. See UserCredentialProvider — an org-keyed provider
  * here would give every rep the same mailbox.
@@ -26,9 +25,6 @@ import { projectThreads, type GmailThread, type ProjectedThread } from "./gmail-
 
 const PROVIDER = "gmail";
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
-
-/** Only the headers projection reads. Asking for more is asking for content. */
-const METADATA_HEADERS = ["From", "To", "Subject"] as const;
 
 /** A page size Gmail accepts; also the floor for `max_threads`. */
 const PAGE_SIZE = 100;
@@ -46,6 +42,11 @@ export type GmailSyncOptions = {
   max_threads?: number;
   /** Only threads with activity in the last N days. Defaults to 60. */
   newer_than_days?: number;
+  /**
+   * external_id → history_id already held. A listed thread whose history id
+   * matches is reported as unchanged and not fetched.
+   */
+  known?: ReadonlyMap<string, string>;
 };
 
 export type GmailSyncResult = {
@@ -56,10 +57,15 @@ export type GmailSyncResult = {
   listed: number;
   /** True when the bound stopped the list before Gmail ran out of pages. */
   truncated: boolean;
+  /** Listed, held already, and unchanged: not fetched. */
+  unchanged: string[];
 };
 
 type Profile = { emailAddress?: string };
-type ThreadList = { threads?: Array<{ id: string }>; nextPageToken?: string };
+type ThreadList = {
+  threads?: Array<{ id: string; historyId?: string }>;
+  nextPageToken?: string;
+};
 
 export async function syncGmailThreads(
   config: GmailSyncConfig,
@@ -108,41 +114,50 @@ export async function syncGmailThreads(
   const selfAddresses = [profile.emailAddress];
 
   // 2. Which threads. Bounded and recency-filtered server-side.
-  const ids: string[] = [];
+  const listed: Array<{ id: string; historyId?: string }> = [];
   let pageToken: string | undefined;
   let truncated = false;
   do {
     const params = new URLSearchParams({
-      maxResults: String(Math.min(PAGE_SIZE, maxThreads - ids.length)),
+      maxResults: String(Math.min(PAGE_SIZE, maxThreads - listed.length)),
       q: `newer_than:${newerThanDays}d`,
     });
     if (pageToken) params.set("pageToken", pageToken);
     const page = (await get(`${GMAIL_BASE}/threads?${params.toString()}`)) as ThreadList;
-    for (const t of page.threads ?? []) ids.push(t.id);
+    for (const t of page.threads ?? []) listed.push(t);
     pageToken = page.nextPageToken;
-    if (ids.length >= maxThreads && pageToken) {
+    if (listed.length >= maxThreads && pageToken) {
       truncated = true;
       break;
     }
   } while (pageToken);
 
-  // 3. Headers only, one request per thread. Sequential on purpose: a burst of
-  // a few hundred concurrent requests is how a connector gets rate-limited on
-  // its first sync and then reported as "broken".
+  // 3. Full content, one request per CHANGED thread. Sequential on purpose: a
+  // burst of a few hundred concurrent requests is how a connector gets
+  // rate-limited on its first sync and then reported as "broken".
   const raw: GmailThread[] = [];
-  for (const id of ids) {
-    const params = new URLSearchParams({ format: "metadata" });
-    for (const h of METADATA_HEADERS) params.append("metadataHeaders", h);
-    raw.push(
-      (await get(`${GMAIL_BASE}/threads/${encodeURIComponent(id)}?${params}`)) as GmailThread,
-    );
+  const unchanged: string[] = [];
+  for (const t of listed) {
+    const held = options.known?.get(t.id);
+    if (held !== undefined && t.historyId !== undefined && held === t.historyId) {
+      unchanged.push(t.id);
+      continue;
+    }
+    const params = new URLSearchParams({ format: "full" });
+    const fetched = (await get(
+      `${GMAIL_BASE}/threads/${encodeURIComponent(t.id)}?${params}`,
+    )) as GmailThread;
+    // The list is authoritative for the id we compare against next time.
+    const historyId = fetched.historyId ?? t.historyId;
+    raw.push(historyId !== undefined ? { ...fetched, historyId } : fetched);
   }
 
   return {
     self_addresses: selfAddresses,
     threads: projectThreads(raw, selfAddresses),
-    listed: ids.length,
+    listed: listed.length,
     truncated,
+    unchanged,
   };
 }
 

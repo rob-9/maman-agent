@@ -8,6 +8,13 @@ import {
   type NamingInput,
   type NamingOutput,
 } from "./provider.js";
+import {
+  assessDeterministically,
+  assessmentInputSchema,
+  assessmentOutputSchema,
+  type AssessmentInput,
+  type AssessmentOutput,
+} from "./assessment.js";
 
 /**
  * DemoModelProvider: fully deterministic, zero-credential implementation that
@@ -79,6 +86,19 @@ export class DeterministicModelProvider implements ModelProvider {
           capability_id,
         })),
       },
+      usage: { input_tokens: 0, output_tokens: 0, model_alias: "demo" },
+    };
+  }
+  async assessObligation(input: AssessmentInput): Promise<ModelResult<AssessmentOutput>> {
+    const parsed = assessmentInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "policy_violation", detail: "invalid assessment input" };
+    }
+    const validated = assessmentOutputSchema.safeParse(assessDeterministically(parsed.data));
+    if (!validated.success) return { ok: false, error: "invalid_output" };
+    return {
+      ok: true,
+      value: validated.data,
       usage: { input_tokens: 0, output_tokens: 0, model_alias: "demo" },
     };
   }

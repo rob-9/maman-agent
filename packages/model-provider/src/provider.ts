@@ -1,5 +1,6 @@
 import { looksLikeSecret } from "@maman/contracts";
 import { z } from "zod";
+import type { AssessmentInput, AssessmentOutput } from "./assessment.js";
 
 /**
  * ModelProvider interface. LLM output is UNTRUSTED DATA everywhere:
@@ -29,7 +30,7 @@ import { z } from "zod";
  * the browser wire: an unbounded field is an exfiltration channel, and a
  * credential-shaped one is a leak whatever its length.
  */
-const promptSafeText = (max: number) =>
+export const promptSafeText = (max: number) =>
   z
     .string()
     .max(max)
@@ -108,6 +109,13 @@ export interface ModelProvider {
    * static validator, and policy engine before anything is persisted.
    */
   draftAgentPlan(input: CompileInput): Promise<ModelResult<unknown>>;
+  /**
+   * The agent pass over one detected obligation: given the thread content and
+   * the facts around it, is a follow-up owed, what is the ask, how urgent.
+   * Narrows and annotates; can never add an obligation the detector did not
+   * find, and every field is bounded by assessmentOutputSchema.
+   */
+  assessObligation(input: AssessmentInput): Promise<ModelResult<AssessmentOutput>>;
 }
 
 /** Rejects any capability id that was not offered in the prompt. */

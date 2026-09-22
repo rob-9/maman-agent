@@ -5,23 +5,26 @@
  * Address parsing, self-identification and direction are all fiddly, all
  * load-bearing, and all cheap to test exhaustively once they take plain data.
  *
- * THE SCOPE ENFORCES THE DESIGN. This connector holds
- * `gmail.metadata`, which grants headers and NOT message bodies — so a thread
- * projected here structurally cannot carry what was said. The plan calls
- * `threads` content-free on purpose; here that is not a convention anyone has
- * to respect, it is the only data we are permitted to read.
+ * A projected thread carries headers only: who, when, direction, subject.
+ * What was said is read separately for the agent (gmail-body.ts) and never
+ * stored. The `threads` table is content-free by construction.
  */
+
+import { bodyText, STORED_MAX_CHARS, type GmailPart } from "./gmail-body.js";
 
 export type GmailHeader = { name: string; value: string };
 
 export type GmailMessage = {
   id: string;
   internalDate?: string;
-  payload?: { headers?: GmailHeader[] };
+  /** Headers always; parts and body when fetched with format=full. */
+  payload?: GmailPart & { headers?: GmailHeader[] };
 };
 
 export type GmailThread = {
   id: string;
+  /** Gmail's change counter for the thread. Same id, same content. */
+  historyId?: string;
   messages?: GmailMessage[];
 };
 
@@ -33,15 +36,81 @@ export type Participant = {
   display_name?: string;
 };
 
+/** One message's content, as the agent will read it. */
+export type ProjectedMessage = {
+  external_id: string;
+  from_address: string;
+  from_display_name?: string;
+  direction: "inbound" | "outbound";
+  sent_at: string;
+  /** Plain text, quoted history cut, bounded. Empty when Gmail sent no body. */
+  text: string;
+};
+
 export type ProjectedThread = {
   external_id: string;
+  history_id?: string;
   subject: string;
   last_message_at: string;
   last_direction: "inbound" | "outbound";
   message_count: number;
   /** The other party. Never the user themselves. */
   contact: Participant;
+  /** Oldest first. Every message with a usable From and timestamp. */
+  messages: ProjectedMessage[];
 };
+
+/** The last N of a thread's messages in the agent's reading shape, bounded per message. */
+export type ContentMessage = {
+  from: string;
+  direction: "inbound" | "outbound";
+  sent_at: string;
+  text: string;
+};
+export type ThreadContent = { external_id: string; messages: ContentMessage[] };
+
+export function projectContent(
+  thread: GmailThread,
+  selfAddresses: readonly string[],
+  opts: { max_messages?: number; max_chars?: number } = {},
+): ThreadContent {
+  const maxMessages = opts.max_messages ?? 8;
+  const maxChars = opts.max_chars ?? 4000;
+  const messages = projectMessages(thread, selfAddresses).slice(-maxMessages);
+  return {
+    external_id: thread.id,
+    messages: messages.map((m) => ({
+      from: m.from_display_name ?? m.from_address,
+      direction: m.direction,
+      sent_at: m.sent_at,
+      text: m.text.slice(0, maxChars),
+    })),
+  };
+}
+
+function projectMessages(
+  thread: GmailThread,
+  selfAddresses: readonly string[],
+): ProjectedMessage[] {
+  const ordered = [...(thread.messages ?? [])].sort(
+    (a, b) => Number(a.internalDate ?? 0) - Number(b.internalDate ?? 0),
+  );
+  const out: ProjectedMessage[] = [];
+  for (const m of ordered) {
+    const from = parseAddress(headerValue(m, "From") ?? "");
+    const ms = Number(m.internalDate ?? NaN);
+    if (!from || !Number.isFinite(ms)) continue;
+    out.push({
+      external_id: m.id,
+      from_address: from.address,
+      ...(from.display_name !== undefined ? { from_display_name: from.display_name } : {}),
+      direction: isSelf(from.address, selfAddresses) ? "outbound" : "inbound",
+      sent_at: new Date(ms).toISOString(),
+      text: bodyText(m).slice(0, STORED_MAX_CHARS),
+    });
+  }
+  return out;
+}
 
 function headerValue(message: GmailMessage, name: string): string | undefined {
   const wanted = name.toLowerCase();
@@ -154,11 +223,13 @@ export function projectThread(
 
   return {
     external_id: thread.id,
+    ...(thread.historyId ? { history_id: thread.historyId } : {}),
     subject: headerValue(last, "Subject") ?? "(no subject)",
     last_message_at: new Date(lastMs).toISOString(),
     last_direction: outbound ? "outbound" : "inbound",
     message_count: messages.length,
     contact: named ?? contact,
+    messages: projectMessages(thread, selfAddresses),
   };
 }
 

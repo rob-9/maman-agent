@@ -24,3 +24,11 @@ export type {
   SweepTarget,
   WorkspaceSweepResult,
 } from "./workflow.js";
+export { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
+export {
+  decryptBody,
+  encryptBody,
+  storedThreadContent,
+  toSyncedMessage,
+  voiceExemplars,
+} from "./content.js";

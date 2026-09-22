@@ -34,8 +34,8 @@ export default async function OverviewPage() {
     <>
       <h1>Organization overview</h1>
       <p className="muted">
-        Aggregate figures only. No screen content, no individual activity, no productivity ranking —
-        those never leave the employee&apos;s device.
+        Aggregate figures only. No screen content, no individual activity, no productivity ranking.
+        Those never leave the employee&apos;s device.
       </p>
 
       <div className="grid" style={{ marginTop: 16 }}>

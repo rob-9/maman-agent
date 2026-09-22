@@ -275,3 +275,57 @@ describe("projectThreads", () => {
     expect(out.map((t) => t.external_id)).toEqual(["good"]);
   });
 });
+
+describe("what a projected thread carries for the agent", () => {
+  const b64 = (t: string) => Buffer.from(t, "utf8").toString("base64url");
+  it("every message with a From and a time, oldest first, direction from the user's addresses, body text bounded", () => {
+    const thread = {
+      id: "t",
+      historyId: "h-42",
+      messages: [
+        { id: "m0", payload: { headers: [{ name: "From", value: "nobody@x.com" }] } },
+        {
+          id: "m1",
+          internalDate: "100",
+          payload: {
+            headers: [
+              { name: "From", value: "me@acme.com" },
+              { name: "To", value: "sarah@acme.com" },
+            ],
+          },
+        },
+        {
+          id: "m2",
+          internalDate: "200",
+          payload: {
+            headers: [
+              { name: "From", value: "Sarah <sarah@acme.com>" },
+              { name: "Subject", value: "Hi" },
+            ],
+            mimeType: "text/plain",
+            body: { data: b64("Can you confirm?\n\nOn Mon, me wrote:\n> old") },
+          },
+        },
+      ],
+    };
+    const p = projectThread(thread, ["me@acme.com"])!;
+    expect(p.history_id).toBe("h-42");
+    expect(p.messages).toEqual([
+      {
+        external_id: "m1",
+        from_address: "me@acme.com",
+        direction: "outbound",
+        sent_at: new Date(100).toISOString(),
+        text: "",
+      },
+      {
+        external_id: "m2",
+        from_address: "sarah@acme.com",
+        from_display_name: "Sarah",
+        direction: "inbound",
+        sent_at: new Date(200).toISOString(),
+        text: "Can you confirm?",
+      },
+    ]);
+  });
+});

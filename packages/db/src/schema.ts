@@ -426,6 +426,39 @@ export const threads = pgTable("threads", {
   last_message_at: utc("last_message_at").notNull(),
   last_direction: text("last_direction", { enum: ["inbound", "outbound"] }).notNull(),
   message_count: integer("message_count").notNull(),
+  /** Gmail's per-thread history id; unchanged means not fetched again. */
+  history_id: text("history_id"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+/** Message content, encrypted at rest to the person. See migration 0011. */
+export const messages = pgTable("messages", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  thread_id: uuid("thread_id").notNull(),
+  external_id: text("external_id").notNull(),
+  from_address: text("from_address").notNull(),
+  from_display_name: text("from_display_name"),
+  direction: text("direction", { enum: ["inbound", "outbound"] }).notNull(),
+  sent_at: utc("sent_at").notNull(),
+  body_ciphertext: bytea("body_ciphertext").notNull(),
+  body_chars: integer("body_chars").notNull(),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+/** The agent's judgment about a thread. See migration 0010. */
+export const thread_assessments = pgTable("thread_assessments", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  thread_id: uuid("thread_id").notNull(),
+  assessed_last_message_at: utc("assessed_last_message_at").notNull(),
+  assessment: jsonb("assessment").notNull(),
+  model_alias: text("model_alias").notNull(),
+  assessed_at: utc("assessed_at").notNull().defaultNow(),
   created_at: utc("created_at").notNull().defaultNow(),
   updated_at: utc("updated_at").notNull().defaultNow(),
 });

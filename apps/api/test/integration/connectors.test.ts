@@ -121,14 +121,14 @@ describe("connector broker (M8)", () => {
       method: "GET",
       url: `/v1/connectors/salesforce/callback?code=auth-code&state=${encodeURIComponent(state)}`,
     });
-    expect(cbRes.statusCode).toBe(200);
-    const body = cbRes.json();
-    expect(body.connected).toBe(true);
-    expect(body.connector.status).toBe("connected");
-    // The token NEVER appears in any client-facing response.
-    expect(JSON.stringify(body)).not.toContain(SECRET_TOKEN);
-    expect(JSON.stringify(body)).not.toContain("SECRET_REFRESH");
-    expect(body.connector).not.toHaveProperty("access_token");
+    // The browser is sent home to the web app's Connections page. The URL
+    // names the provider and the outcome and NOTHING else.
+    expect(cbRes.statusCode).toBe(303);
+    expect(cbRes.headers["location"]).toBe(
+      "http://localhost:3000/connections?provider=salesforce&connected=1",
+    );
+    expect(cbRes.body).not.toContain(SECRET_TOKEN);
+    expect(cbRes.body).not.toContain("SECRET_REFRESH");
 
     // …and it is not readable from /v1/connectors either.
     const listRes = await app.inject({ method: "GET", url: "/v1/connectors", headers: headers() });

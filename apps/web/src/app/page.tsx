@@ -31,8 +31,8 @@ export default async function InboxPage() {
       <div className="card">
         <h3>Nothing to read yet</h3>
         <p className="muted">
-          Connect your mailbox and this page becomes the list of people you&apos;re about to drop —
-          ranked, and with the reason on every card. Nothing to configure.
+          Connect your mailbox to see the people you are about to drop, ranked, with the reason on
+          every card. Nothing to set up.
         </p>
         <Link className="button" href="/connections">
           Connect Gmail
@@ -42,6 +42,7 @@ export default async function InboxPage() {
   }
 
   const items = obligations.data.obligations;
+  const agentMode = obligations.data.agent_mode;
   return (
     <>
       <div className="row">
@@ -62,13 +63,21 @@ export default async function InboxPage() {
 
       <div className="stack">
         {items.map((o) => {
-          const why = explain(o);
+          const why = explain(o, agentMode);
           return (
             <div className="card item" key={o.id}>
               <div className="item-main">
                 <span className={`pill ${o.kind}`}>{KIND_LABEL[o.kind]}</span>
+                {why.source === "agent" && o.assessment?.urgency === "high" ? (
+                  <span className="pill urgent">Urgent</span>
+                ) : null}
                 <h3>{why.headline}</h3>
                 <p className="muted">{why.detail}</p>
+                {why.ask ? (
+                  <p className="ask">
+                    They are waiting on: <span>{why.ask}</span>
+                  </p>
+                ) : null}
                 <p className="fine">
                   {o.contact_account_name ? `${o.contact_account_name} · ` : ""}
                   {o.reason.message_count} {o.reason.message_count === 1 ? "message" : "messages"}
@@ -103,8 +112,8 @@ export default async function InboxPage() {
       </div>
 
       <p className="fine" style={{ marginTop: 24 }}>
-        &ldquo;Draft follow-up&rdquo; writes a draft to your Gmail Drafts folder. Nothing is sent
-        until you open it and press Send yourself.
+        &ldquo;Draft follow-up&rdquo; saves a draft in your Gmail Drafts folder. Nothing is sent
+        until you open it and press Send.
       </p>
     </>
   );

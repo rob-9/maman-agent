@@ -50,7 +50,8 @@ export type CompileRequest = {
   policy: OrgPolicy;
   policy_version_id: string;
   now: () => Date;
-  model?: ModelProvider;
+  /** The compiler needs naming and plan drafting only; the agent pass is elsewhere. */
+  model?: Pick<ModelProvider, "id" | "nameRecommendation" | "draftAgentPlan">;
   /**
    * The runtime that will execute the result. When supplied, a recipe may only
    * emit steps this runtime has an adapter for, in the mode the step needs; a

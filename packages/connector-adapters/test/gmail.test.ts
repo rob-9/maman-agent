@@ -33,7 +33,7 @@ function thread(id: string, from: string, to: string, when: string) {
  */
 function fakeGmail(opts: {
   self?: string;
-  pages?: Array<{ ids: string[]; next?: string }>;
+  pages?: Array<{ ids: string[]; next?: string; history?: Record<string, string> }>;
   threads?: Record<string, unknown>;
   unauthorizedUntilRefresh?: boolean;
 }) {
@@ -58,7 +58,10 @@ function fakeGmail(opts: {
         status: 200,
         headers: {},
         body: {
-          threads: page.ids.map((id) => ({ id })),
+          threads: page.ids.map((id) => ({
+            id,
+            ...(page.history?.[id] ? { historyId: page.history[id] } : {}),
+          })),
           ...(page.next ? { nextPageToken: page.next } : {}),
         },
       };
@@ -113,20 +116,40 @@ describe("syncGmailThreads", () => {
     expect(g.requests.every((r) => r.method === "GET")).toBe(true);
   });
 
-  it("asks for metadata with an explicit header allowlist, never a body", async () => {
-    // format=metadata + metadataHeaders is what keeps content out of the
-    // response. gmail.metadata would refuse format=full anyway; this pins that
-    // the request and the scope agree.
+  it("fetches each changed thread in full, once, and only threads that changed", async () => {
+    // The conversation is the agent's input, so the fetch is format=full. The
+    // cost control is the history id: a thread already held at the same id
+    // is reported unchanged and not fetched at all.
+    const g = fakeGmail({
+      pages: [{ ids: ["a", "b"], history: { a: "h-1", b: "h-9" } }],
+      threads: {
+        a: thread("a", "x@y.com", "me@acme.com", "2026-09-10T09:00:00Z"),
+        b: thread("b", "z@y.com", "me@acme.com", "2026-09-11T09:00:00Z"),
+      },
+    });
+    const result = await syncGmailThreads(g, KEY, {
+      known: new Map([
+        ["a", "h-1"],
+        ["b", "h-2"],
+      ]),
+    });
+    const fetches = g.requests.filter((r) => /\/threads\/[^?]+\?/.test(r.url));
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]!.url).toContain("/threads/b?");
+    expect(new URL(fetches[0]!.url).searchParams.get("format")).toBe("full");
+    expect(result.unchanged).toEqual(["a"]);
+    expect(result.listed).toBe(2);
+    expect(result.threads.map((t) => [t.external_id, t.history_id])).toEqual([["b", "h-9"]]);
+  });
+
+  it("a thread with no history id from Gmail is always fetched", async () => {
     const g = fakeGmail({
       pages: [{ ids: ["a"] }],
       threads: { a: thread("a", "x@y.com", "me@acme.com", "2026-09-10T09:00:00Z") },
     });
-    await syncGmailThreads(g, KEY);
-    const fetches = g.requests.filter((r) => /\/threads\/[^?]+\?/.test(r.url));
-    expect(fetches).toHaveLength(1);
-    const params = new URL(fetches[0]!.url).searchParams;
-    expect(params.get("format")).toBe("metadata");
-    expect(params.getAll("metadataHeaders").sort()).toEqual(["From", "Subject", "To"]);
+    const result = await syncGmailThreads(g, KEY, { known: new Map([["a", "h-1"]]) });
+    expect(result.unchanged).toEqual([]);
+    expect(result.threads).toHaveLength(1);
   });
 
   it("filters by recency server-side", async () => {

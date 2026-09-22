@@ -263,7 +263,7 @@ describe("the principal reaches the workspace", () => {
       headers: { authorization: await bearer("user_ada", "org_co") },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ obligations: [] });
+    expect(res.json()).toEqual({ obligations: [], agent_mode: "off" });
   });
 });
 

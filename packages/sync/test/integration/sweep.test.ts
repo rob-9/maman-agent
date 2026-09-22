@@ -200,6 +200,7 @@ describe("createSweepActivities", () => {
       return transport({ ...req, url: url.toString() });
     },
     now: () => NOW,
+    contentKey: master,
   });
   let whoIsSyncing = "";
 

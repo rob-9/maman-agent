@@ -9,7 +9,7 @@ export default async function AuditPage() {
     <>
       <h1>Audit log</h1>
       <p className="muted">
-        Policy and execution metadata only — never personal raw events or workflow content. Export
+        Policy and execution metadata only. Never personal raw events or workflow content. Export
         produces a signed, expiring, metadata-only download.
       </p>
       {!entries || entries.length === 0 ? (

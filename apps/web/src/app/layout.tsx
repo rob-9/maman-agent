@@ -56,8 +56,8 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
             <div className="card">
               <h3>Your account isn&apos;t in a team yet</h3>
               <p className="muted">
-                Everything in {branding.name} belongs to a team, so there is nothing to show until
-                an admin adds you to one. Ask them, then sign in again.
+                Everything in {branding.name} belongs to a team. There is nothing to show until an
+                admin adds you to one. Ask them, then sign in again.
               </p>
             </div>
           ) : (

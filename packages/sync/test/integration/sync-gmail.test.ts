@@ -16,9 +16,16 @@ import {
   type DbClient,
 } from "@maman/db";
 import { envelopeEncrypt, packEnvelope } from "@maman/connector-auth";
-import type { DealSource, HttpRequest, HttpResponse } from "@maman/connector-adapters";
+import type {
+  DealSource,
+  HttpRequest,
+  HttpResponse,
+  ThreadContentReader,
+} from "@maman/connector-adapters";
+import type { AssessmentInput, ModelProvider } from "@maman/model-provider";
 import { createUserVaultCredentialProvider } from "../../src/user-vault-credentials.js";
 import { runGmailSyncJob } from "../../src/sync-gmail.js";
+import { decryptBody, storedThreadContent } from "../../src/content.js";
 
 /**
  * THE SLICE, END TO END, ON A REAL DATABASE.
@@ -48,9 +55,17 @@ const bob = uuidv7();
 const NOW = new Date("2026-09-21T12:00:00.000Z");
 const ago = (days: number) => String(NOW.getTime() - days * 86_400_000);
 
-function gmailThread(id: string, from: string, to: string, whenMs: string, subject: string) {
+function gmailThread(
+  id: string,
+  from: string,
+  to: string,
+  whenMs: string,
+  subject: string,
+  text?: string,
+) {
   return {
     id,
+    historyId: `h-${id}-${whenMs}`,
     messages: [
       {
         id: `${id}-m`,
@@ -61,6 +76,9 @@ function gmailThread(id: string, from: string, to: string, whenMs: string, subje
             { name: "To", value: to },
             { name: "Subject", value: subject },
           ],
+          ...(text
+            ? { mimeType: "text/plain", body: { data: Buffer.from(text).toString("base64url") } }
+            : {}),
         },
       },
     ],
@@ -75,6 +93,7 @@ const MAILBOX: Record<string, unknown> = {
     "alice@co.example",
     ago(4),
     "Enterprise pricing",
+    "Thanks Alex. Can you confirm the price holds for 60 seats?",
   ),
   waiting: gmailThread("waiting", "alice@co.example", "bob@client.com", ago(9), "Proposal"),
   fresh: gmailThread("fresh", "alice@co.example", "dan@client.com", ago(1), "Intro"),
@@ -89,7 +108,12 @@ const transport = async (req: HttpRequest): Promise<HttpResponse> => {
     return {
       status: 200,
       headers: {},
-      body: { threads: Object.keys(MAILBOX).map((id) => ({ id })) },
+      body: {
+        threads: Object.keys(MAILBOX).map((id) => ({
+          id,
+          historyId: (MAILBOX[id] as { historyId: string }).historyId,
+        })),
+      },
     };
   }
   const id = decodeURIComponent(url.pathname.split("/").pop()!);
@@ -158,6 +182,7 @@ const deps = () => ({
   }),
   transport,
   now: () => NOW,
+  contentKey: master,
 });
 
 describe("Gmail sync job — the L1 slice on a real database", () => {
@@ -168,6 +193,8 @@ describe("Gmail sync job — the L1 slice on a real database", () => {
     expect(result.listed).toBe(3);
     expect(result.threads_upserted).toBe(3);
     expect(result.contacts_upserted).toBe(3);
+    expect(result.messages_upserted).toBe(3);
+    expect(result.unchanged).toBe(0);
     // "fresh" is 1 day old on an outbound thread — below the 5-day threshold.
     expect(result.obligations_written).toBe(2);
 
@@ -185,9 +212,19 @@ describe("Gmail sync job — the L1 slice on a real database", () => {
     });
   });
 
-  it("is idempotent — a second sync changes nothing", async () => {
-    const again = await runGmailSyncJob(deps(), { organizationId: orgId, userId: alice });
+  it("is idempotent — a second sync changes nothing, and fetches nothing that did not move", async () => {
+    const fetched: string[] = [];
+    const spying = async (req: HttpRequest) => {
+      if (/\/threads\/[^?]+\?/.test(req.url)) fetched.push(req.url);
+      return transport(req);
+    };
+    const again = await runGmailSyncJob(
+      { ...deps(), transport: spying },
+      { organizationId: orgId, userId: alice },
+    );
     expect(again.ok && again.obligations_written).toBe(2);
+    expect(again.ok && again.unchanged).toBe(3);
+    expect(fetched).toEqual([]);
     const list = await listPendingObligations(client.sql, { organizationId: orgId, userId: alice });
     expect(list).toHaveLength(2);
   });
@@ -323,5 +360,203 @@ describe("with a CRM connected — the deal step", () => {
       (o) => o.subject === "Proposal",
     )!;
     expect(proposal.reason).toMatchObject({ has_open_deal: true, open_deal_value: 40_000 });
+  });
+});
+
+describe("the agent pass", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  const BODIES: Record<string, string> = {
+    owed: "Can you confirm the price holds for 60 seats?",
+    waiting: "Sending the proposal over.",
+  };
+  const seen: AssessmentInput[] = [];
+  let mode: "judge" | "down" = "judge";
+  let refuse = new Set<string>();
+  const provider: ModelProvider = {
+    id: "demo",
+    nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
+    draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
+    async assessObligation(input) {
+      seen.push(input);
+      if (mode === "down") return { ok: false, error: "unavailable" };
+      const owed = !refuse.has(input.subject);
+      return {
+        ok: true,
+        value: {
+          owed,
+          ask: owed ? "a price confirmation" : "",
+          summary: owed ? "They want the price confirmed." : "Closed out.",
+          urgency: owed ? "high" : "low",
+          confidence: 0.9,
+        },
+        usage: { input_tokens: 1, output_tokens: 1, model_alias: "fake" },
+      };
+    },
+  };
+  const reads: string[] = [];
+  const content: ThreadContentReader = {
+    async read(_key, id, selfAddresses) {
+      reads.push(id);
+      expect(selfAddresses).toEqual(["alice@co.example"]);
+      return {
+        external_id: id,
+        messages: [
+          { from: "x", direction: "inbound", sent_at: NOW.toISOString(), text: BODIES[id] ?? "" },
+        ],
+      };
+    },
+  };
+  const withAgent = (max?: number) => ({
+    ...deps(),
+    agent: { provider, content, ...(max ? { max_candidates: max } : {}) },
+  });
+
+  it("reads each candidate from the STORE (Gmail is not asked), with the facts, the text and the relationship", async () => {
+    refuse = new Set(["Enterprise pricing"]);
+    const result = await runGmailSyncJob(withAgent(), ctx);
+    expect(result.ok && result.agent).toEqual({
+      considered: 2,
+      assessed: 2,
+      reused: 0,
+      failed: 0,
+      model_alias: "fake",
+    });
+    // Content came from the encrypted store; the Gmail fallback was never used.
+    expect(reads).toEqual([]);
+    const pricing = seen.find((i) => i.subject === "Enterprise pricing")!;
+    expect(pricing).toMatchObject({ kind: "awaiting_you", days_elapsed: 4, has_open_deal: null });
+    expect(pricing.messages[0]!.text).toBe(
+      "Thanks Alex. Can you confirm the price holds for 60 seats?",
+    );
+    expect(pricing.history).toEqual([]);
+    const proposal = seen.find((i) => i.subject === "Proposal")!;
+    expect(proposal).toMatchObject({
+      kind: "awaiting_them",
+      has_open_deal: true,
+      open_deal_value: 40_000,
+      account_name: "Client Co",
+    });
+    // Stored, but only as ciphertext: the plaintext is in no table.
+    for (const table of ["threads", "contacts", "obligations", "thread_assessments", "messages"]) {
+      const rows = await withUser(
+        client.sql,
+        ctx,
+        (tx) => tx`SELECT to_jsonb(t)::text AS j FROM ${tx(table)} t`,
+      );
+      for (const r of rows) expect(String(r["j"])).not.toContain("60 seats");
+    }
+    // ...and it opens only for Alice.
+    const stored = await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`SELECT m.body_ciphertext FROM messages m JOIN threads t ON t.id = m.thread_id WHERE t.external_id = 'owed'`,
+    );
+    const ct = stored[0]!["body_ciphertext"] as Uint8Array;
+    expect(decryptBody(ct, master, ctx)).toContain("60 seats");
+    expect(() => decryptBody(ct, master, { organizationId: orgId, userId: bob })).toThrow();
+  });
+
+  it("the store serves a thread's conversation in the agent's shape, and nothing for a colleague", async () => {
+    const t = await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`SELECT id FROM threads WHERE external_id = 'owed'`,
+    );
+    const tid = t[0]!["id"] as string;
+    const content = await storedThreadContent({ sql: client.sql, contentKey: master }, ctx, tid);
+    expect(content?.messages).toEqual([
+      {
+        from: "Sarah Chen",
+        direction: "inbound",
+        sent_at: new Date(Number(ago(4))).toISOString(),
+        text: "Thanks Alex. Can you confirm the price holds for 60 seats?",
+      },
+    ]);
+    expect(
+      await storedThreadContent(
+        { sql: client.sql, contentKey: master },
+        { organizationId: orgId, userId: bob },
+        tid,
+      ),
+    ).toBeNull();
+  });
+
+  it("with the agent on, a not-owed item is hidden; with it off, the list is untouched", async () => {
+    const on = await listPendingObligations(client.sql, ctx, 50, { agent: true });
+    expect(on.map((o) => o.subject)).toEqual(["Proposal"]);
+    expect(on[0]!.assessment).toMatchObject({
+      owed: true,
+      urgency: "high",
+      ask: "a price confirmation",
+    });
+    const off = await listPendingObligations(client.sql, ctx, 50);
+    expect(off.map((o) => o.subject)).toEqual(["Enterprise pricing", "Proposal"]);
+  });
+
+  it("an unchanged thread is not judged again", async () => {
+    seen.length = 0;
+    reads.length = 0;
+    const result = await runGmailSyncJob(withAgent(), ctx);
+    expect(result.ok && result.agent).toMatchObject({
+      considered: 2,
+      assessed: 0,
+      reused: 2,
+      failed: 0,
+    });
+    expect(reads).toEqual([]);
+  });
+
+  it("a thread that moved is judged again, and only that one", async () => {
+    // Bob answered 6 days ago: the thread moved and is still stalled, now on Alice.
+    MAILBOX["waiting"] = gmailThread(
+      "waiting",
+      "alice@co.example",
+      "bob@client.com",
+      ago(9),
+      "Proposal",
+    );
+    (MAILBOX["waiting"] as { historyId: string }).historyId = "h-waiting-moved";
+    (MAILBOX["waiting"] as { messages: unknown[] }).messages.push({
+      id: "waiting-m2",
+      internalDate: ago(6),
+      payload: {
+        headers: [
+          { name: "From", value: "bob@client.com" },
+          { name: "To", value: "alice@co.example" },
+          { name: "Subject", value: "Proposal" },
+        ],
+      },
+    });
+    seen.length = 0;
+    const result = await runGmailSyncJob(withAgent(), ctx);
+    expect(result.ok && result.agent).toMatchObject({ assessed: 1, reused: 1, failed: 0 });
+    expect(seen.map((i) => i.subject)).toEqual(["Proposal"]);
+    expect(seen[0]).toMatchObject({ kind: "awaiting_you", days_elapsed: 6 });
+  });
+
+  it("when the model is down the items keep their arithmetic place, and the pass never throws", async () => {
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    mode = "down";
+    try {
+      const result = await runGmailSyncJob(withAgent(), ctx);
+      expect(result.ok).toBe(true);
+      expect(result.ok && result.agent).toMatchObject({ considered: 2, assessed: 0, failed: 2 });
+      const on = await listPendingObligations(client.sql, ctx, 50, { agent: true });
+      // Nothing judged, nothing hidden: the deterministic list, in its order.
+      expect(on.map((o) => [o.subject, o.assessment])).toEqual([
+        ["Proposal", null],
+        ["Enterprise pricing", null],
+      ]);
+    } finally {
+      mode = "judge";
+    }
+  });
+
+  it("is bounded to the top candidates", async () => {
+    refuse = new Set();
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    const result = await runGmailSyncJob(withAgent(1), ctx);
+    expect(result.ok && result.agent).toMatchObject({ considered: 1, assessed: 1 });
   });
 });

@@ -16,7 +16,12 @@ import {
   verifyState,
   type TokenTransport,
 } from "@maman/connector-auth";
-import { createGmailDraft, fetchTransport, type HttpTransport } from "@maman/connector-adapters";
+import {
+  createGmailDraft,
+  fetchTransport,
+  gmailContentReader,
+  type HttpTransport,
+} from "@maman/connector-adapters";
 import {
   createUserConnection,
   getObligationForDraft,
@@ -31,9 +36,11 @@ import {
   resolveDealSource,
   runGmailSyncJob,
 } from "@maman/sync";
+import { createModelProvider } from "@maman/model-provider";
 import { deterministicComposer, type DraftComposer } from "@maman/voice-engine";
 import { requirePrincipal } from "./auth.js";
 import { authorize } from "./authorization.js";
+import { landing } from "./connectors.js";
 
 /**
  * THE PERSON'S WORKSPACE over HTTP — `/v1/me/*`.
@@ -83,6 +90,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
   const gmailTransport = deps.gmailTransport ?? fetchTransport;
   const crmTransport = deps.crmTransport ?? fetchTransport;
   const composer = deps.composer ?? deterministicComposer;
+  const agentOn = env.AGENT_MODE === "assist";
+  const modelProvider = createModelProvider(env);
 
   const clientFor = (provider: string) =>
     provider === "gmail" && env.GOOGLE_CLIENT_ID
@@ -188,6 +197,12 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
 
       const verifier = pkceStore.get(payload.nonce);
       pkceStore.delete(payload.nonce); // single use
+      // A PKCE provider with no verifier on file means this state was already
+      // spent (or minted by another process): the exchange would either fail
+      // at the provider or, worse, succeed without the proof. Refuse here.
+      if (getProvider(provider)!.supports_pkce && !verifier) {
+        return reply.redirect(landing(env, provider, { error: "state_reused" }), 303);
+      }
 
       const client = clientFor(provider);
       const result = await exchangeCode(
@@ -201,7 +216,9 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         },
         tokenTransport,
       );
-      if (!result.ok) return reply.status(502).send({ status: 502, detail: result.error });
+      if (!result.ok) {
+        return reply.redirect(landing(env, provider, { error: "exchange_failed" }), 303);
+      }
 
       // THE USER IS IN THE AAD. Copy this ciphertext into a colleague's row and
       // it will not open. The plaintext token dies with this scope.
@@ -226,8 +243,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         encrypted_credentials: packed,
         scopes: getProvider(provider)!.scopes,
       });
-      // STATUS ONLY. No token, no ciphertext.
-      return { connected: true, connection_id: created.id, provider };
+      // The browser came from Google's consent screen; send it home. The URL
+      // says which provider connected and nothing else — no token, no id.
+      void created;
+      return reply.redirect(landing(env, provider, { connected: true }), 303);
     },
   );
 
@@ -238,18 +257,32 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     if (!principal) return;
     if (!deps.sql) return reply.status(503).send({ status: 503 });
     const sql = deps.sql;
+    const credentials = createUserVaultCredentialProvider({
+      sql,
+      masterKey: master,
+      transport: tokenTransport,
+      clientCredentials: clientFor,
+    });
     const result = await runGmailSyncJob(
       {
         sql,
-        credentials: createUserVaultCredentialProvider({
-          sql,
-          masterKey: master,
-          transport: tokenTransport,
-          clientCredentials: clientFor,
-        }),
+        credentials,
         transport: gmailTransport,
         now,
+        // Mail content is stored encrypted to the person, under the same
+        // derived key that opens their mailbox token.
+        contentKey: master,
         deals: dealsFor(sql),
+        // The agent pass runs only when switched on; off means the list is
+        // the deterministic ranking, exactly as before the agent existed.
+        ...(agentOn
+          ? {
+              agent: {
+                provider: modelProvider,
+                content: gmailContentReader({ credentials, transport: gmailTransport }),
+              },
+            }
+          : {}),
       },
       userCtx(principal),
     );
@@ -269,7 +302,12 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     if (!principal) return;
     if (!deps.sql) return reply.status(503).send({ status: 503 });
     const limit = Math.min(200, Math.max(1, Number((req.query as { limit?: string }).limit ?? 50)));
-    return { obligations: await listPendingObligations(deps.sql, userCtx(principal), limit) };
+    return {
+      obligations: await listPendingObligations(deps.sql, userCtx(principal), limit, {
+        agent: agentOn,
+      }),
+      agent_mode: agentOn ? "assist" : "off",
+    };
   });
 
   const outcomeBody = z
