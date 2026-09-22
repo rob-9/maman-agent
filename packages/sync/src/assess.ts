@@ -10,6 +10,7 @@ import {
 import type { AssessmentInput, ModelProvider } from "@maman/model-provider";
 import { storedThreadContent } from "./content.js";
 import { meetingContext } from "./meetings.js";
+import { intentsFor } from "./intents.js";
 
 /**
  * THE AGENT PASS. Runs after detection, over the candidates the detector
@@ -76,7 +77,16 @@ export async function runAgentPass(
         limit: 10,
       });
       const meetings = await meetingContext(deps, ctx, c.contact_address, deps.now());
-      const input = { ...toAssessmentInput(c, content.messages, history), ...meetings };
+      const preferences = await intentsFor(deps, ctx, {
+        contact_address: c.contact_address,
+        account_name: c.contact_account_name,
+        kind: c.kind,
+      });
+      const input = {
+        ...toAssessmentInput(c, content.messages, history),
+        ...meetings,
+        ...(preferences.length > 0 ? { preferences } : {}),
+      };
       const judged = await deps.provider.assessObligation(input);
       if (!judged.ok) throw new Error(judged.error);
       await upsertThreadAssessment(deps.sql, ctx, {

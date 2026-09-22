@@ -13,12 +13,32 @@ import { endSession, signInUrl } from "./session.js";
 
 export async function snoozeAction(id: string): Promise<void> {
   const until = new Date(Date.now() + 3 * 86_400_000).toISOString();
-  await me.outcome(id, "snoozed", until);
+  await me.outcome(id, "snoozed", { snoozed_until: until });
   revalidatePath("/");
 }
 
-export async function dismissAction(id: string): Promise<void> {
-  await me.outcome(id, "dismissed");
+/** "Not needed", with an optional reason in the person's words. Both are kept as intent. */
+export async function dismissAction(id: string, formData?: FormData): Promise<void> {
+  const note = formData?.get("note");
+  await me.outcome(
+    id,
+    "dismissed",
+    typeof note === "string" && note.trim() ? { note: note.trim() } : {},
+  );
+  revalidatePath("/");
+}
+
+/** Something the person tells the agent, in their words. */
+export async function stateIntentAction(formData: FormData): Promise<void> {
+  const text = formData.get("text");
+  if (typeof text !== "string" || text.trim() === "") return;
+  const res = await me.stateIntent(text.trim());
+  if (!res.ok) throw new Error(`could not save that (${res.status})`);
+  revalidatePath("/");
+}
+
+export async function forgetIntentAction(id: string): Promise<void> {
+  await me.retireIntent(id);
   revalidatePath("/");
 }
 

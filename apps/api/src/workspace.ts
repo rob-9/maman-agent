@@ -36,8 +36,13 @@ import {
   createOrgVaultCredentialProvider,
   createUserVaultCredentialProvider,
   encryptBody,
+  forgetIntent,
+  intentsFor,
+  listIntentViews,
   meetingContext,
   resolveDealSource,
+  skippedWithReasons,
+  stateIntent,
   runGmailSyncJob,
   storedThreadContent,
   voiceFor,
@@ -319,10 +324,11 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     if (!principal) return;
     if (!deps.sql) return reply.status(503).send({ status: 503 });
     const limit = Math.min(200, Math.max(1, Number((req.query as { limit?: string }).limit ?? 50)));
+    const ctx = userCtx(principal);
     return {
-      obligations: await listPendingObligations(deps.sql, userCtx(principal), limit, {
-        agent: agentOn,
-      }),
+      obligations: await listPendingObligations(deps.sql, ctx, limit, { agent: agentOn }),
+      // What the person's own rules set aside, with the rule in their words.
+      skipped: await skippedWithReasons({ sql: deps.sql, contentKey: master }, ctx),
       agent_mode: agentOn ? "assist" : "off",
     };
   });
@@ -331,6 +337,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     .object({
       outcome: z.enum(["snoozed", "dismissed", "resolved", "drafted"]),
       snoozed_until: z.string().datetime().optional(),
+      /** Why, in the person's words. Kept as intent shown by action. */
+      note: z.string().max(300).optional(),
     })
     .strict();
 
@@ -341,6 +349,12 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     const body = outcomeBody.safeParse(req.body);
     if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
     const id = (req.params as { id: string }).id;
+    // Read what it was about BEFORE it stops being pending, so a dismissal
+    // can be written down with the subject and the person it concerned.
+    const target =
+      body.data.outcome === "dismissed"
+        ? await getObligationForDraft(deps.sql, userCtx(principal), id).catch(() => null)
+        : null;
     const updated = await setObligationOutcome(
       deps.sql,
       userCtx(principal),
@@ -351,7 +365,61 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     // Missing and someone-else's are the same 404. Never 403: a 403 confirms
     // the row exists, which is exactly the fact RLS is there to withhold.
     if (!updated) return reply.status(404).send({ status: 404, title: "Not Found" });
+    // A dismissal is the person telling the agent something. It is written
+    // down, scoped to the contact, as an observation; never turned into a
+    // rule on its own.
+    if (body.data.outcome === "dismissed") {
+      const subject = target?.thread.subject ?? "a thread";
+      const who = target?.contact.display_name ?? "a contact";
+      const text = body.data.note?.trim()
+        ? `Dismissed "${subject}" with ${who}: ${body.data.note.trim()}`
+        : `Dismissed "${subject}" with ${who} as not needed.`;
+      await stateIntent(
+        { sql: deps.sql, contentKey: master },
+        userCtx(principal),
+        text,
+        "observed",
+        { obligation_id: id },
+      ).catch(() => undefined);
+    }
     return { id, outcome: body.data.outcome };
+  });
+
+  // ---- the intent store: what the person has told the agent ----
+
+  app.get("/v1/me/intents", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    return {
+      intents: await listIntentViews({ sql: deps.sql, contentKey: master }, userCtx(principal)),
+    };
+  });
+
+  const intentBody = z.object({ text: z.string().min(1).max(300) }).strict();
+
+  app.post("/v1/me/intents", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const body = intentBody.safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+    const intent = await stateIntent(
+      { sql: deps.sql, contentKey: master },
+      userCtx(principal),
+      body.data.text,
+    );
+    return { intent };
+  });
+
+  app.post("/v1/me/intents/:id/retire", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const id = (req.params as { id: string }).id;
+    const ok = await forgetIntent({ sql: deps.sql, contentKey: master }, userCtx(principal), id);
+    if (!ok) return reply.status(404).send({ status: 404, title: "Not Found" });
+    return { id, status: "retired" };
   });
 
   // ---- drafting: the first write, and the only kind the demo performs ----
@@ -394,6 +462,11 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
       target.contact.external_id,
       now(),
     );
+    const preferences = await intentsFor({ sql, contentKey: master }, ctx, {
+      contact_address: target.contact.external_id,
+      account_name: target.contact.account_name,
+      kind: target.kind,
+    });
     const draft = await composer.compose({
       kind: target.kind,
       contact_display_name: target.contact.display_name,
@@ -411,6 +484,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
       sender_address: sender?.email ?? "",
       messages: content.messages.slice(-8),
       ...(target.assessment?.ask ? { ask: target.assessment.ask } : {}),
+      ...(preferences.length > 0 ? { preferences } : {}),
       voice,
     });
 

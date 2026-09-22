@@ -28,6 +28,7 @@ import { runGmailSyncJob } from "../../src/sync-gmail.js";
 import { decryptBody, encryptBody, storedThreadContent } from "../../src/content.js";
 import { voiceFor } from "../../src/voice.js";
 import { meetingContext } from "../../src/meetings.js";
+import { intentsFor, listIntentViews, skippedWithReasons, stateIntent } from "../../src/intents.js";
 import { recordDraft, draftOutcomes } from "@maman/db";
 
 /**
@@ -770,5 +771,113 @@ describe("the calendar step", () => {
       new Date(Number(ago(1)) + 1000),
     );
     expect(walkthrough.last_meeting?.title).toBe("Kickoff");
+  });
+});
+
+describe("the intent store in the sweep", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  const ideps = () => ({ sql: client.sql, contentKey: master });
+
+  it("a stated rule sets a chase aside, says why in the person's words, and a reply owed is untouched", async () => {
+    // A fresh quiet thread to Dan, chased twice, no answer.
+    MAILBOX["chase"] = gmailThread(
+      "chase",
+      "alice@co.example",
+      "dan@client.com",
+      ago(12),
+      "Renewal",
+    );
+    (MAILBOX["chase"] as { messages: unknown[] }).messages.push({
+      id: "chase-m2",
+      internalDate: ago(8),
+      payload: {
+        headers: [
+          { name: "From", value: "alice@co.example" },
+          { name: "To", value: "dan@client.com" },
+          { name: "Subject", value: "Renewal" },
+        ],
+      },
+    });
+    CALENDAR = { items: [], nextSyncToken: "cal-tok-9" };
+    const before = await runGmailSyncJob(deps(), ctx);
+    expect(before.ok && before.obligations_skipped).toBe(0);
+    const chase = await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`SELECT chase_count FROM threads WHERE external_id = 'chase'`,
+    );
+    expect(chase[0]!["chase_count"]).toBe(2);
+
+    const said = await stateIntent(
+      ideps(),
+      ctx,
+      "Don't chase Dan, he'll come back when the budget clears.",
+    );
+    expect(said).toMatchObject({
+      is_rule: true,
+      scope: { kind: "contact", value: "dan@client.com" },
+      source: "stated",
+    });
+    const after = await runGmailSyncJob(deps(), ctx);
+    expect(after.ok && after.obligations_skipped).toBe(1);
+    const skipped = await skippedWithReasons(ideps(), ctx);
+    expect(skipped.map((s) => [s.subject, s.intent_text])).toEqual([
+      ["Renewal", "Don't chase Dan, he'll come back when the budget clears."],
+    ]);
+    // Sarah's question is still owed: a rule about chasing never hides a reply.
+    expect((await listPendingObligations(client.sql, ctx)).map((o) => o.subject)).toContain(
+      "Enterprise pricing",
+    );
+    // Retire it: the next sweep brings the chase back.
+    const views = await listIntentViews(ideps(), ctx);
+    const { forgetIntent } = await import("../../src/intents.js");
+    expect(await forgetIntent(ideps(), ctx, views[0]!.id)).toBe(true);
+    const back = await runGmailSyncJob(deps(), ctx);
+    expect(back.ok && back.obligations_skipped).toBe(0);
+    expect((await listPendingObligations(client.sql, ctx)).map((o) => o.subject)).toContain(
+      "Renewal",
+    );
+  });
+
+  it("'never more than twice' counts the chases already made", async () => {
+    await stateIntent(ideps(), ctx, "Never follow up more than twice.");
+    const r = await runGmailSyncJob(deps(), ctx);
+    expect(r.ok && r.obligations_skipped).toBe(1);
+    expect((await skippedWithReasons(ideps(), ctx)).map((s) => s.subject)).toEqual(["Renewal"]);
+    for (const v of await listIntentViews(ideps(), ctx)) {
+      const { forgetIntent } = await import("../../src/intents.js");
+      await forgetIntent(ideps(), ctx, v.id);
+    }
+  });
+
+  it("guidance reaches the model, most specific first, and only what bears on the contact", async () => {
+    await stateIntent(ideps(), ctx, "Keep emails to Sarah short.");
+    await stateIntent(ideps(), ctx, "Sign off as Cheers, A.");
+    await stateIntent(ideps(), ctx, "Dan prefers a call over email.");
+    const forSarah = await intentsFor(ideps(), ctx, {
+      contact_address: "sarah@acme.com",
+      account_name: null,
+      kind: "awaiting_you",
+    });
+    expect(forSarah).toEqual(["Keep emails to Sarah short.", "Sign off as Cheers, A."]);
+    const seen: AssessmentInput[] = [];
+    const provider: ModelProvider = {
+      id: "demo",
+      nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
+      draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
+      composeDraft: async () => ({ ok: false, error: "unavailable" }),
+      async assessObligation(input) {
+        seen.push(input);
+        return {
+          ok: true,
+          value: { owed: true, ask: "", summary: "s", urgency: "normal", confidence: 0.5 },
+          usage: { input_tokens: 0, output_tokens: 0, model_alias: "fake" },
+        };
+      },
+    };
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    await runGmailSyncJob({ ...deps(), agent: { provider } }, ctx);
+    const pricing = seen.find((i) => i.subject === "Enterprise pricing")!;
+    expect(pricing.preferences).toEqual(["Keep emails to Sarah short.", "Sign off as Cheers, A."]);
   });
 });

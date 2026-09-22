@@ -176,7 +176,9 @@ export class AnthropicModelProvider implements ModelProvider {
           "plain sentence for a card (summary, no more than 240 characters, no " +
           "hedging), urgency (high, normal, low) and confidence 0 to 1. " +
           "owed is false when the other side closed the loop, when the last message " +
-          "is automated, or when nothing is being waited on. Respond with ONLY a JSON " +
+          "is automated, or when nothing is being waited on. If the data includes " +
+          "`preferences`, those are the rep's own standing instructions: honour them. " +
+          "Respond with ONLY a JSON " +
           'object: {"owed", "ask", "summary", "urgency", "confidence"}.',
         messages: [
           {
@@ -229,7 +231,9 @@ export class AnthropicModelProvider implements ModelProvider {
           "holds the conversation and the facts: every claim in your reply must come " +
           "from it. Do not invent meetings, dates, prices, discounts or commitments. " +
           "If the other person asked something the rep must decide, acknowledge it and " +
-          "say a proper answer is coming rather than making one up. Plain text, no " +
+          "say a proper answer is coming rather than making one up. If the thread data " +
+          "includes `preferences`, those are the rep's own standing instructions about " +
+          "how to write and what to do: honour them. Plain text, no " +
           'markdown, no placeholders like [name]. Respond with ONLY JSON: {"subject", "body"}.',
         messages: [
           {

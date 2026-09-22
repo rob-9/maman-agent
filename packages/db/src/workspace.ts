@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull, sql as rawSql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, sql as rawSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import type { Sql, TransactionSql } from "postgres";
 import { uuidv7 } from "@maman/contracts";
@@ -39,6 +39,7 @@ export type SyncedThread = {
   last_message_at: string;
   last_direction: "inbound" | "outbound";
   message_count: number;
+  chase_count?: number | undefined;
   contact: { address: string; display_name?: string | undefined };
   messages?: readonly SyncedMessage[] | undefined;
 };
@@ -112,6 +113,7 @@ export async function upsertSyncedThreads(
           last_message_at: t.last_message_at,
           last_direction: t.last_direction,
           message_count: t.message_count,
+          chase_count: t.chase_count ?? 0,
           history_id: t.history_id ?? null,
         })
         .onConflictDoUpdate({
@@ -121,6 +123,7 @@ export async function upsertSyncedThreads(
             last_message_at: t.last_message_at,
             last_direction: t.last_direction,
             message_count: t.message_count,
+            chase_count: t.chase_count ?? 0,
             history_id: t.history_id ?? null,
             updated_at: rawSql`now()`,
           },
@@ -175,9 +178,12 @@ export type DetectionInputs = {
     last_message_at: string;
     last_direction: "inbound" | "outbound";
     message_count: number;
+    chase_count: number;
   }>;
   contacts: Array<{
     contact_id: string;
+    /** The mailbox address; the key a person's own rules are scoped by. */
+    address: string;
     display_name: string;
     account_name?: string;
     open_deal_value?: number;
@@ -205,9 +211,11 @@ export async function loadDetectionInputs(sql: Sql, ctx: UserContext): Promise<D
         last_message_at: new Date(r.last_message_at).toISOString(),
         last_direction: r.last_direction,
         message_count: r.message_count,
+        chase_count: r.chase_count,
       })),
       contacts: contactRows.map((r) => ({
         contact_id: r.id,
+        address: r.external_id,
         display_name: r.display_name,
         ...(r.account_name !== null ? { account_name: r.account_name } : {}),
         ...(r.open_deal_value !== null ? { open_deal_value: Number(r.open_deal_value) } : {}),
@@ -844,13 +852,20 @@ export async function replacePendingObligations(
   ctx: UserContext,
   detected: readonly DetectedObligation[],
   detectedAt: Date,
-): Promise<{ written: number; kept_decided: number }> {
+  /** Detections the person's own rules set aside; stored as `skipped`, rewritten like pending. */
+  skipped: readonly { obligation: DetectedObligation; intent_id: string }[] = [],
+): Promise<{ written: number; kept_decided: number; skipped: number }> {
   return withUser(sql, ctx, async (tx) => {
     const d = db(tx);
-    await d.delete(schema.obligations).where(eq(schema.obligations.outcome, "pending"));
+    await d
+      .delete(schema.obligations)
+      .where(inArray(schema.obligations.outcome, ["pending", "skipped"]));
 
-    let written = 0;
-    for (const o of detected) {
+    const insert = async (
+      o: DetectedObligation,
+      outcome: "pending" | "skipped",
+      intentId?: string,
+    ) => {
       const rows = await d
         .insert(schema.obligations)
         .values({
@@ -862,14 +877,142 @@ export async function replacePendingObligations(
           kind: o.kind,
           rank: String(o.rank),
           reason: o.reason,
-          outcome: "pending",
+          outcome,
+          applied_intent_id: intentId ?? null,
           detected_at: detectedAt.toISOString(),
         })
         .onConflictDoNothing({ target: schema.obligations.thread_id })
         .returning({ id: schema.obligations.id });
-      written += rows.length;
-    }
-    return { written, kept_decided: detected.length - written };
+      return rows.length;
+    };
+    let written = 0;
+    for (const o of detected) written += await insert(o, "pending");
+    let skippedWritten = 0;
+    for (const s of skipped) skippedWritten += await insert(s.obligation, "skipped", s.intent_id);
+    return { written, kept_decided: detected.length - written, skipped: skippedWritten };
+  });
+}
+
+export type SkippedObligationRow = {
+  id: string;
+  thread_id: string;
+  kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
+  subject: string;
+  contact_display_name: string;
+  applied_intent_id: string | null;
+};
+
+/** What the person's own rules set aside, so the product can say so. */
+export async function listSkippedObligations(
+  sql: Sql,
+  ctx: UserContext,
+  limit = 20,
+): Promise<SkippedObligationRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    return db(tx)
+      .select({
+        id: schema.obligations.id,
+        thread_id: schema.obligations.thread_id,
+        kind: schema.obligations.kind,
+        subject: schema.threads.subject,
+        contact_display_name: schema.contacts.display_name,
+        applied_intent_id: schema.obligations.applied_intent_id,
+      })
+      .from(schema.obligations)
+      .innerJoin(schema.threads, eq(schema.threads.id, schema.obligations.thread_id))
+      .innerJoin(schema.contacts, eq(schema.contacts.id, schema.obligations.contact_id))
+      .where(eq(schema.obligations.outcome, "skipped"))
+      .orderBy(desc(schema.obligations.rank), schema.obligations.thread_id)
+      .limit(limit);
+  });
+}
+
+// ---------- the intent store ----------
+
+export type IntentRow = {
+  id: string;
+  text_ciphertext: Uint8Array;
+  text_chars: number;
+  source: "stated" | "observed" | "inferred";
+  status: "active" | "proposed" | "retired";
+  scope_kind: "global" | "contact" | "account" | "situation";
+  scope_value: string | null;
+  rule: unknown;
+  origin: unknown;
+  created_at: string;
+};
+
+export async function createIntent(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    text_ciphertext: Uint8Array;
+    text_chars: number;
+    source: IntentRow["source"];
+    status?: IntentRow["status"];
+    scope_kind: IntentRow["scope_kind"];
+    scope_value?: string | null;
+    rule?: unknown;
+    origin?: unknown;
+  },
+): Promise<{ id: string }> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx)
+      .insert(schema.intents)
+      .values({
+        id: uuidv7(),
+        organization_id: ctx.organizationId,
+        owner_user_id: ctx.userId,
+        text_ciphertext: input.text_ciphertext,
+        text_chars: input.text_chars,
+        source: input.source,
+        status: input.status ?? "active",
+        scope_kind: input.scope_kind,
+        scope_value: input.scope_value ?? null,
+        rule: input.rule ?? null,
+        origin: input.origin ?? null,
+      })
+      .returning({ id: schema.intents.id });
+    return { id: row!.id };
+  });
+}
+
+/** Active entries, newest first. Ciphertext; the caller decrypts. */
+export async function listIntents(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { status?: IntentRow["status"]; limit?: number } = {},
+): Promise<IntentRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.intents)
+      .where(eq(schema.intents.status, opts.status ?? "active"))
+      .orderBy(desc(schema.intents.created_at))
+      .limit(opts.limit ?? 100);
+    return rows.map((r) => ({
+      id: r.id,
+      text_ciphertext: r.text_ciphertext,
+      text_chars: r.text_chars,
+      source: r.source,
+      status: r.status,
+      scope_kind: r.scope_kind,
+      scope_value: r.scope_value,
+      rule: r.rule,
+      origin: r.origin,
+      created_at: new Date(r.created_at).toISOString(),
+    }));
+  });
+}
+
+export async function retireIntent(sql: Sql, ctx: UserContext, id: string): Promise<boolean> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .update(schema.intents)
+      .set({ status: "retired", retired_at: rawSql`now()`, updated_at: rawSql`now()` })
+      .where(and(eq(schema.intents.id, id), eq(schema.intents.status, "active")))
+      .returning({ id: schema.intents.id });
+    return rows.length === 1;
   });
 }
 

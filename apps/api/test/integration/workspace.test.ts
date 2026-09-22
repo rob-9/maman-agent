@@ -692,3 +692,94 @@ describe("AGENT_MODE=assist — the agent pass over HTTP", () => {
     expect(subjects).toContain("Proposal");
   });
 });
+
+describe("the intent store over HTTP", () => {
+  it("what Alice says is kept in her words, scoped, enforced, and visible only to her", async () => {
+    const said = await app.inject({
+      method: "POST",
+      url: "/v1/me/intents",
+      headers: as(alice),
+      payload: { text: "Don't chase Bob, procurement is slow." },
+    });
+    expect(said.statusCode).toBe(200);
+    expect(said.json().intent).toMatchObject({
+      text: "Don't chase Bob, procurement is slow.",
+      is_rule: true,
+      // "Bob" names exactly one of her contacts, so the rule is scoped to him.
+      scope: { kind: "contact", value: "bob@client.com" },
+    });
+    const list = await app.inject({ method: "GET", url: "/v1/me/intents", headers: as(alice) });
+    expect(list.json().intents).toHaveLength(1);
+    // Stored as ciphertext.
+    const raw = await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`SELECT text_ciphertext::text AS t FROM intents`,
+    );
+    expect(String(raw[0]!["t"])).not.toContain("procurement");
+    // Bob sees nothing and cannot retire it.
+    const bobs = await app.inject({ method: "GET", url: "/v1/me/intents", headers: as(bob) });
+    expect(bobs.json().intents).toEqual([]);
+    const id = said.json().intent.id as string;
+    expect(
+      (await app.inject({ method: "POST", url: `/v1/me/intents/${id}/retire`, headers: as(bob) }))
+        .statusCode,
+    ).toBe(404);
+    expect(
+      (await app.inject({ method: "POST", url: `/v1/me/intents/${id}/retire`, headers: as(alice) }))
+        .statusCode,
+    ).toBe(200);
+    expect(
+      (await app.inject({ method: "GET", url: "/v1/me/intents", headers: as(alice) })).json()
+        .intents,
+    ).toEqual([]);
+  });
+
+  it("a dismissal with a reason is written down as something the agent noticed", async () => {
+    await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`UPDATE obligations SET outcome = 'pending', snoozed_until = NULL`,
+    );
+    const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
+    const first = (list.json().obligations as Array<Record<string, unknown>>)[0]!;
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${first["id"]}/outcome`,
+      headers: as(alice),
+      payload: { outcome: "dismissed", note: "they already signed" },
+    });
+    expect(res.statusCode).toBe(200);
+    const intents = (
+      await app.inject({ method: "GET", url: "/v1/me/intents", headers: as(alice) })
+    ).json().intents as Array<Record<string, unknown>>;
+    // Earlier tests dismissed things too; the newest entry is this one.
+    expect(intents[0]).toMatchObject({ source: "observed", is_rule: false });
+    expect(String(intents[0]!["text"])).toContain("they already signed");
+    expect(String(intents[0]!["text"])).toContain(String(first["subject"]));
+    expect(list.json().skipped).toEqual([]);
+  });
+
+  it("rejects an empty or oversized statement", async () => {
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/v1/me/intents",
+          headers: as(alice),
+          payload: { text: "" },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/v1/me/intents",
+          headers: as(alice),
+          payload: { text: "x".repeat(301) },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+});

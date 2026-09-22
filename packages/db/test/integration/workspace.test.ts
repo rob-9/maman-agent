@@ -25,6 +25,10 @@ import {
   listContactMeetings,
   getCalendarSyncToken,
   setCalendarSyncToken,
+  createIntent,
+  listIntents,
+  retireIntent,
+  listSkippedObligations,
   type SyncedThread,
 } from "../../src/workspace.js";
 import { startTestDb, type TestDb } from "./setup.js";
@@ -160,7 +164,7 @@ describe("workspace repository", () => {
       [mk(t1!.thread_id, 40), mk(t2!.thread_id, 30)],
       new Date(),
     );
-    expect(r1).toEqual({ written: 2, kept_decided: 0 });
+    expect(r1).toEqual({ written: 2, kept_decided: 0, skipped: 0 });
 
     // The user snoozes one.
     await withUser(db.client.sql, ctx, async (tx) => {
@@ -175,7 +179,7 @@ describe("workspace repository", () => {
       new Date(),
     );
     // The snoozed one is NOT re-surfaced — a reminder, not a nag.
-    expect(r2).toEqual({ written: 1, kept_decided: 1 });
+    expect(r2).toEqual({ written: 1, kept_decided: 1, skipped: 0 });
 
     const pending = await listPendingObligations(db.client.sql, ctx);
     expect(pending.map((p) => p.thread_id)).toEqual([t1!.thread_id]);
@@ -883,5 +887,105 @@ describe("meetings", () => {
     expect(
       await listContactMeetings(sql(), { organizationId: orgId, userId: other }, "ann@acme.com"),
     ).toEqual([]);
+  });
+});
+
+describe("the intent store and what it sets aside", () => {
+  const sql = () => db.client.sql;
+  let intentId = "";
+  let threadId = "";
+  let contactId = "";
+
+  it("keeps entries as ciphertext with their scope and rule, and retires them", async () => {
+    const { id } = await createIntent(sql(), ctx, {
+      text_ciphertext: Buffer.from("enc:don't chase acme"),
+      text_chars: 16,
+      source: "stated",
+      scope_kind: "account",
+      scope_value: "Acme",
+      rule: { kind: "no_chase", scope: { kind: "account", value: "Acme" } },
+    });
+    intentId = id;
+    const active = await listIntents(sql(), ctx);
+    expect(active.map((i) => [i.id, i.scope_kind, i.scope_value, i.source])).toEqual([
+      [id, "account", "Acme", "stated"],
+    ]);
+    expect(active[0]!.rule).toEqual({
+      kind: "no_chase",
+      scope: { kind: "account", value: "Acme" },
+    });
+    const raw = await withUser(
+      sql(),
+      ctx,
+      (tx) => tx`SELECT text_ciphertext::text AS t FROM intents`,
+    );
+    expect(String(raw[0]!["t"])).not.toContain("acme");
+  });
+
+  it("a skipped detection is stored with the rule that set it aside, and rewritten by the next sweep", async () => {
+    await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "sk-1",
+          subject: "Skip me",
+          contact: { address: "ann@acme.com" },
+          chase_count: 2,
+        }),
+      ],
+    });
+    const inputs = await loadDetectionInputs(sql(), ctx);
+    const t = inputs.threads.find((x) => x.subject === "Skip me")!;
+    threadId = t.thread_id;
+    contactId = t.contact_id;
+    expect(t.chase_count).toBe(2);
+    const o = {
+      thread_id: threadId,
+      contact_id: contactId,
+      kind: "awaiting_them" as const,
+      rank: 40,
+      reason: { days_elapsed: 6 },
+    };
+    const r = await replacePendingObligations(
+      sql(),
+      ctx,
+      [],
+      new Date("2026-09-21T12:00:00.000Z"),
+      [{ obligation: o, intent_id: intentId }],
+    );
+    expect(r).toEqual({ written: 0, kept_decided: 0, skipped: 1 });
+    expect(
+      (await listSkippedObligations(sql(), ctx)).map((s) => [s.subject, s.applied_intent_id]),
+    ).toEqual([["Skip me", intentId]]);
+    expect((await listPendingObligations(sql(), ctx)).map((x) => x.thread_id)).not.toContain(
+      threadId,
+    );
+    // The rule is retired; the next sweep brings it back as pending.
+    expect(await retireIntent(sql(), ctx, intentId)).toBe(true);
+    expect(await retireIntent(sql(), ctx, intentId)).toBe(false);
+    expect(await listIntents(sql(), ctx)).toEqual([]);
+    await replacePendingObligations(sql(), ctx, [o], new Date("2026-09-21T12:00:00.000Z"));
+    expect(await listSkippedObligations(sql(), ctx)).toEqual([]);
+    expect((await listPendingObligations(sql(), ctx)).map((x) => x.thread_id)).toContain(threadId);
+  });
+
+  it("a colleague sees no intents and cannot retire one", async () => {
+    const other = uuidv7();
+    await globalCreateUser(sql(), {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "peer6@co.example",
+      display_name: "Peer",
+    });
+    await addMembership(sql(), { organizationId: orgId }, { user_id: other, role: "member" });
+    const theirs = { organizationId: orgId, userId: other };
+    const { id } = await createIntent(sql(), ctx, {
+      text_ciphertext: Buffer.from("x"),
+      text_chars: 1,
+      source: "stated",
+      scope_kind: "global",
+    });
+    expect(await listIntents(sql(), theirs)).toEqual([]);
+    expect(await retireIntent(sql(), theirs, id)).toBe(false);
   });
 });

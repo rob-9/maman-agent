@@ -15,7 +15,12 @@ import {
   upsertSyncedThreads,
   type UserContext,
 } from "@maman/db";
-import { detectObligations, type DetectionConfig } from "@maman/obligation-engine";
+import {
+  applyIntentRules,
+  detectObligations,
+  type DetectionConfig,
+} from "@maman/obligation-engine";
+import { activeRules } from "./intents.js";
 import type { DealSourceResolver } from "./deal-source.js";
 import { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
 import { toSyncedMessage } from "./content.js";
@@ -79,6 +84,8 @@ export type GmailSyncJobResult =
       calendar: CalendarStepResult;
       obligations_written: number;
       obligations_kept_decided: number;
+      /** Set aside by the person's own rules this sweep. */
+      obligations_skipped: number;
       deals: DealStepResult;
       agent: AgentPassResult | null;
     }
@@ -161,7 +168,26 @@ export async function runGmailSyncJob(
     now,
     ...(options.detection ? { config: options.detection } : {}),
   });
-  const replaced = await replacePendingObligations(deps.sql, ctx, detected, now);
+  // The person's own rules, enforced here, before the agent and with it off.
+  const rules = await activeRules(deps.sql, ctx);
+  const applied = applyIntentRules(
+    detected,
+    rules,
+    new Map(
+      inputs.contacts.map((c) => [
+        c.contact_id,
+        { address: c.address, display_name: c.display_name, account_name: c.account_name ?? null },
+      ]),
+    ),
+    new Map(inputs.threads.map((t) => [t.thread_id, t])),
+  );
+  const replaced = await replacePendingObligations(
+    deps.sql,
+    ctx,
+    applied.kept,
+    now,
+    applied.skipped,
+  );
 
   // The agent looks at what the detector found, after the rows are in place
   // so its judgments key to real obligations. Never before, never instead.
@@ -188,6 +214,7 @@ export async function runGmailSyncJob(
     calendar,
     obligations_written: replaced.written,
     obligations_kept_decided: replaced.kept_decided,
+    obligations_skipped: replaced.skipped,
     deals,
     agent,
   };

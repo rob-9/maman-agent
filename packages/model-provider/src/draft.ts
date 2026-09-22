@@ -33,6 +33,8 @@ export const draftInputSchema = z
     messages: z.array(assessmentMessageSchema).min(1).max(8),
     /** The agent's judgment, when it has one: what they are waiting on. */
     ask: promptSafeText(200).optional(),
+    /** The person's own instructions that bear on this draft. */
+    preferences: z.array(promptSafeText(300)).max(12).optional(),
     voice: z
       .object({
         to_this_contact: z.array(exemplar).max(3),

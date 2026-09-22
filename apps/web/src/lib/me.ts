@@ -58,6 +58,25 @@ export type ConnectionView = {
   last_error: string | null;
 };
 
+/** An entry in the intent store, in the person's own words. */
+export type IntentView = {
+  id: string;
+  text: string;
+  source: "stated" | "observed" | "inferred";
+  scope: { kind: "global" | "contact" | "account" | "situation"; value?: string };
+  is_rule: boolean;
+  created_at: string;
+};
+
+/** A detection the person's own rule set aside. */
+export type SkippedView = {
+  id: string;
+  subject: string;
+  contact_display_name: string;
+  kind: string;
+  intent_text: string | null;
+};
+
 export type OrgConnectorView = {
   id: string;
   provider: string;
@@ -69,18 +88,26 @@ export type OrgConnectorView = {
 
 export const me = {
   obligations: () =>
-    call<{ obligations: ObligationView[]; agent_mode: "off" | "assist" }>(
+    call<{ obligations: ObligationView[]; skipped: SkippedView[]; agent_mode: "off" | "assist" }>(
       "GET",
       "/v1/me/obligations",
     ),
+  intents: () => call<{ intents: IntentView[] }>("GET", "/v1/me/intents"),
+  stateIntent: (text: string) => call<{ intent: IntentView }>("POST", "/v1/me/intents", { text }),
+  retireIntent: (id: string) => call<{ id: string }>("POST", `/v1/me/intents/${id}/retire`),
   connections: () => call<{ connections: ConnectionView[] }>("GET", "/v1/me/connections"),
   authorize: (provider: string) =>
     call<{ authorization_url: string }>("POST", `/v1/me/connections/${provider}/authorize`),
   sync: () => call<{ ok: true; obligations_written: number }>("POST", "/v1/me/sync"),
-  outcome: (id: string, outcome: "snoozed" | "dismissed" | "resolved", snoozed_until?: string) =>
+  outcome: (
+    id: string,
+    outcome: "snoozed" | "dismissed" | "resolved",
+    opts: { snoozed_until?: string; note?: string } = {},
+  ) =>
     call<{ id: string }>("POST", `/v1/me/obligations/${id}/outcome`, {
       outcome,
-      ...(snoozed_until ? { snoozed_until } : {}),
+      ...(opts.snoozed_until ? { snoozed_until: opts.snoozed_until } : {}),
+      ...(opts.note ? { note: opts.note } : {}),
     }),
   /** The ORGANIZATION's connectors (CRM). Status views only, like everything here. */
   connectors: () =>

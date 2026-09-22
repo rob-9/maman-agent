@@ -9,6 +9,7 @@ import {
   type UserContext,
 } from "@maman/db";
 import { decryptBody } from "./content.js";
+import { stateIntent } from "./intents.js";
 
 /**
  * VOICE: the person's own writing, retrieved for the draft at hand.
@@ -101,12 +102,24 @@ export async function matchSentDrafts(
     if (!sent) continue;
     const draftText = decryptBody(d.body_ciphertext, deps.contentKey, ctx);
     const sentText = decryptBody(sent.body_ciphertext, deps.contentKey, ctx);
+    const ratio = similarity(draftText, sentText);
     await matchDraftToSent(deps.sql, ctx, d.id, {
       external_id: sent.external_id,
       sent_at: sent.sent_at,
-      edit_ratio: similarity(draftText, sentText),
+      edit_ratio: ratio,
     });
     matched += 1;
+    // A rewrite is the person telling the agent something. Written down,
+    // scoped to the thread, not inferred into a rule.
+    if (ratio < 0.5) {
+      await stateIntent(
+        deps,
+        ctx,
+        `Rewrote the agent's draft on "${d.subject}" (kept ${Math.round(ratio * 100)}% of it).`,
+        "observed",
+        { draft_id: d.id, thread_id: d.thread_id },
+      );
+    }
   }
   return { matched };
 }

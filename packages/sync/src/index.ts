@@ -35,3 +35,12 @@ export {
 export { editDistance, matchSentDrafts, similarity, voiceFor, type Voice } from "./voice.js";
 export { runCalendarStep, toSyncedMeeting, type CalendarStepResult } from "./sync-calendar.js";
 export { meetingContext, type MeetingContext } from "./meetings.js";
+export {
+  activeRules,
+  forgetIntent,
+  intentsFor,
+  listIntentViews,
+  skippedWithReasons,
+  stateIntent,
+  type IntentView,
+} from "./intents.js";

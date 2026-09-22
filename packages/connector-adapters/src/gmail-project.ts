@@ -54,6 +54,8 @@ export type ProjectedThread = {
   last_message_at: string;
   last_direction: "inbound" | "outbound";
   message_count: number;
+  /** How many messages in a row the user has sent at the end without an answer. */
+  chase_count: number;
   /** The other party. Never the user themselves. */
   contact: Participant;
   /** Oldest first. Every message with a usable From and timestamp. */
@@ -221,6 +223,7 @@ export function projectThread(
   // real name.
   const named = everyone.find((p) => p.address === contact.address && p.display_name !== undefined);
 
+  const projected = projectMessages(thread, selfAddresses);
   return {
     external_id: thread.id,
     ...(thread.historyId ? { history_id: thread.historyId } : {}),
@@ -228,9 +231,16 @@ export function projectThread(
     last_message_at: new Date(lastMs).toISOString(),
     last_direction: outbound ? "outbound" : "inbound",
     message_count: messages.length,
+    chase_count: trailingOutbound(projected),
     contact: named ?? contact,
-    messages: projectMessages(thread, selfAddresses),
+    messages: projected,
   };
+}
+
+function trailingOutbound(messages: readonly ProjectedMessage[]): number {
+  let n = 0;
+  for (let i = messages.length - 1; i >= 0 && messages[i]!.direction === "outbound"; i -= 1) n += 1;
+  return n;
 }
 
 /** Projects a page of threads, silently skipping the ones that do not qualify. */

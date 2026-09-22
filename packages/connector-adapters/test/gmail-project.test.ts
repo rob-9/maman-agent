@@ -329,3 +329,31 @@ describe("what a projected thread carries for the agent", () => {
     ]);
   });
 });
+
+describe("how many times the user has chased", () => {
+  it("counts the trailing run of the user's own messages", () => {
+    const m = (id: string, from: string, when: number) => ({
+      id,
+      internalDate: String(when),
+      payload: {
+        headers: [
+          { name: "From", value: from },
+          { name: "To", value: "x@y.com" },
+        ],
+      },
+    });
+    const chased = projectThread(
+      {
+        id: "t",
+        messages: [m("a", "s@y.com", 1), m("b", "me@acme.com", 2), m("c", "me@acme.com", 3)],
+      },
+      ["me@acme.com"],
+    )!;
+    expect(chased.chase_count).toBe(2);
+    const answered = projectThread(
+      { id: "t", messages: [m("a", "me@acme.com", 1), m("b", "s@y.com", 2)] },
+      ["me@acme.com"],
+    )!;
+    expect(answered.chase_count).toBe(0);
+  });
+});

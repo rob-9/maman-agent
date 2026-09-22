@@ -456,6 +456,8 @@ export const threads = pgTable("threads", {
   message_count: integer("message_count").notNull(),
   /** Gmail's per-thread history id; unchanged means not fetched again. */
   history_id: text("history_id"),
+  /** Trailing unanswered messages from the person. "Never more than twice." */
+  chase_count: integer("chase_count").notNull().default(0),
   created_at: utc("created_at").notNull().defaultNow(),
   updated_at: utc("updated_at").notNull().defaultNow(),
 });
@@ -475,6 +477,24 @@ export const messages = pgTable("messages", {
   body_chars: integer("body_chars").notNull(),
   created_at: utc("created_at").notNull().defaultNow(),
   updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+/** The intent store. See migration 0014. */
+export const intents = pgTable("intents", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  text_ciphertext: bytea("text_ciphertext").notNull(),
+  text_chars: integer("text_chars").notNull(),
+  source: text("source", { enum: ["stated", "observed", "inferred"] }).notNull(),
+  status: text("status", { enum: ["active", "proposed", "retired"] }).notNull(),
+  scope_kind: text("scope_kind", { enum: ["global", "contact", "account", "situation"] }).notNull(),
+  scope_value: text("scope_value"),
+  rule: jsonb("rule"),
+  origin: jsonb("origin"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+  retired_at: utc("retired_at"),
 });
 
 /** What the agent wrote, matched later to what was sent. See migration 0012. */
@@ -522,8 +542,10 @@ export const obligations = pgTable("obligations", {
   rank: numeric("rank", { precision: 10, scale: 4 }).notNull(),
   reason: jsonb("reason").notNull(),
   outcome: text("outcome", {
-    enum: ["pending", "drafted", "snoozed", "dismissed", "resolved"],
+    enum: ["pending", "drafted", "snoozed", "dismissed", "resolved", "skipped"],
   }).notNull(),
+  /** The person's own rule that set this aside (outcome = skipped). */
+  applied_intent_id: uuid("applied_intent_id"),
   snoozed_until: utc("snoozed_until"),
   detected_at: utc("detected_at").notNull().defaultNow(),
   created_at: utc("created_at").notNull().defaultNow(),

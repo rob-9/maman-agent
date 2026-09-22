@@ -16,3 +16,15 @@ export {
   type DetectionConfig,
 } from "./types.js";
 export { detectObligations, daysBetween, rankObligation, type DetectInput } from "./detect.js";
+export {
+  applyIntentRules,
+  intentRuleSchema,
+  intentScopeSchema,
+  parseIntentRule,
+  resolveScope,
+  type AppliedRules,
+  type ContactRef,
+  type IntentRule,
+  type IntentRuleRecord,
+  type IntentScope,
+} from "./intents.js";

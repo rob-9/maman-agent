@@ -47,6 +47,8 @@ export const assessmentInputSchema = z
     next_meeting: meetingRefSchema.optional(),
     /** Oldest first. The last one is the message the obligation hinges on. */
     messages: z.array(assessmentMessageSchema).min(1).max(8),
+    /** The person's own instructions that bear on this, most specific first. */
+    preferences: z.array(promptSafeText(300)).max(12).optional(),
     /** The relationship so far: other threads with this person, newest first. */
     history: z
       .array(

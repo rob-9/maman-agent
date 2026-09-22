@@ -1,6 +1,13 @@
 import Link from "next/link";
 import { explain, me, nextMeetingLine } from "@/lib/me";
-import { dismissAction, draftAction, snoozeAction, syncAction } from "@/lib/actions";
+import {
+  dismissAction,
+  draftAction,
+  forgetIntentAction,
+  snoozeAction,
+  stateIntentAction,
+  syncAction,
+} from "@/lib/actions";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +18,11 @@ const KIND_LABEL = {
 } as const;
 
 export default async function InboxPage() {
-  const [obligations, connections] = await Promise.all([me.obligations(), me.connections()]);
+  const [obligations, connections, intents] = await Promise.all([
+    me.obligations(),
+    me.connections(),
+    me.intents(),
+  ]);
 
   if (!connections.ok || !obligations.ok) {
     return (
@@ -42,7 +53,9 @@ export default async function InboxPage() {
   }
 
   const items = obligations.data.obligations;
+  const skipped = obligations.data.skipped;
   const agentMode = obligations.data.agent_mode;
+  const known = intents.ok ? intents.data.intents : [];
   return (
     <>
       <div className="row">
@@ -101,7 +114,14 @@ export default async function InboxPage() {
                     Snooze 3 days
                   </button>
                 </form>
-                <form action={dismissAction.bind(null, o.id)}>
+                <form action={dismissAction.bind(null, o.id)} className="dismiss">
+                  <input
+                    name="note"
+                    type="text"
+                    placeholder="Why? (optional)"
+                    aria-label="Why is this not needed?"
+                    maxLength={300}
+                  />
                   <button className="button quiet" type="submit">
                     Not needed
                   </button>
@@ -116,6 +136,71 @@ export default async function InboxPage() {
         &ldquo;Draft follow-up&rdquo; saves a draft in your Gmail Drafts folder. Nothing is sent
         until you open it and press Send.
       </p>
+
+      {skipped.length > 0 ? (
+        <section className="section">
+          <div className="section-head">
+            <h2>Set aside by what you said</h2>
+            <p className="muted">
+              These matched something you told your agent. Forget the note below to bring one back.
+            </p>
+          </div>
+          <ul className="quiet-list">
+            {skipped.map((s) => (
+              <li key={s.id}>
+                <span className="name">{s.contact_display_name}</span>
+                <span className="muted"> &middot; {s.subject}</span>
+                {s.intent_text ? (
+                  <span className="fine"> &ldquo;{s.intent_text}&rdquo;</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      <section className="section">
+        <div className="section-head">
+          <h2>Tell your agent</h2>
+          <p className="muted">
+            In your own words. &ldquo;Don&apos;t chase Acme.&rdquo; &ldquo;Never follow up more than
+            twice.&rdquo; &ldquo;After a demo, send a recap the same day.&rdquo; Rules are enforced;
+            the rest guides the writing.
+          </p>
+        </div>
+        <form action={stateIntentAction} className="tell">
+          <input
+            name="text"
+            type="text"
+            placeholder="Something your agent should know"
+            aria-label="Tell your agent"
+            maxLength={300}
+            required
+          />
+          <button className="button" type="submit">
+            Save
+          </button>
+        </form>
+        {known.length > 0 ? (
+          <ul className="quiet-list">
+            {known.map((k) => (
+              <li key={k.id}>
+                <span className={`pill ${k.is_rule ? "rule" : ""}`}>
+                  {k.source === "stated" ? (k.is_rule ? "Rule" : "Guidance") : "Noticed"}
+                </span>
+                <span> {k.text}</span>
+                <form action={forgetIntentAction.bind(null, k.id)}>
+                  <button type="submit" className="link">
+                    Forget
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="fine">Nothing yet. Whatever you write here stays with your account only.</p>
+        )}
+      </section>
     </>
   );
 }
