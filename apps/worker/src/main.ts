@@ -13,6 +13,7 @@ import {
   gmailContentReader,
   MemoryIdempotencyStore,
   realAdapterRegistry,
+  salesforceActivityWriter,
 } from "@maman/connector-adapters";
 import { createModelProvider, DeterministicModelProvider } from "@maman/model-provider";
 import { deterministicContextComposer, modelComposer } from "@maman/voice-engine";
@@ -22,6 +23,7 @@ import { createActivities, type PersistenceSink } from "./activities.js";
 import {
   createSweepActivities,
   createUserVaultCredentialProvider,
+  orgPolicyResolver,
   resolveDealSource,
 } from "@maman/sync";
 import { createVaultCredentialProvider } from "./vault-credentials.js";
@@ -162,6 +164,20 @@ function buildSweepActivities() {
           },
         }
       : {}),
+    // Writes to the organization's CRM for what each person sent: proposed
+    // always, applied without asking only under their own promotion.
+    actions: {
+      writer: salesforceActivityWriter({
+        credentials: createVaultCredentialProvider({
+          sql,
+          masterKey,
+          transport: createConnectorTokenTransport(),
+          clientCredentials: orgClientCredentials,
+        }),
+        transport: fetchTransport,
+      }),
+      orgPolicy: orgPolicyResolver(sql),
+    },
     // The organization's CRM (org vault), asked about each person's contacts.
     deals: resolveDealSource({
       sql,

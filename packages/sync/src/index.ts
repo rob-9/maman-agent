@@ -46,3 +46,20 @@ export {
 } from "./intents.js";
 export { runDraftJob, type DraftJobDeps, type DraftJobResult } from "./draft-job.js";
 export { runPredraft, type PredraftDeps, type PredraftResult } from "./predraft.js";
+export {
+  LOG_ACTIVITY,
+  applyAction,
+  approveAction,
+  autoActions,
+  declineAction,
+  diffHash,
+  listActionViews,
+  orgPolicyResolver,
+  promoteAction,
+  proposeActivityLog,
+  revertAction,
+  shapeHash,
+  type ActionDeps,
+  type ActionView,
+  type ActivityDiff,
+} from "./actions.js";

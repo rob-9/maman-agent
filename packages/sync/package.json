@@ -25,7 +25,8 @@
     "postgres": "^3.4.5",
     "@temporalio/workflow": "^1.11.5",
     "@maman/model-provider": "workspace:*",
-    "@maman/voice-engine": "workspace:*"
+    "@maman/voice-engine": "workspace:*",
+    "@maman/policy-engine": "workspace:*"
   },
   "devDependencies": {
     "@maman/contracts": "workspace:*",

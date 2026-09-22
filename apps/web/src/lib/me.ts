@@ -77,6 +77,23 @@ export type SkippedView = {
   intent_text: string | null;
 };
 
+/** A write to the CRM, at whatever point it has reached. */
+export type ActionView = {
+  id: string;
+  kind: string;
+  status:
+    "proposed" | "approved" | "applied" | "verified" | "failed" | "stale" | "declined" | "reverted";
+  diff_sha256: string;
+  summary: string;
+  detail: string;
+  approved_by: "user" | "promotion" | null;
+  external_id: string | null;
+  verified: boolean;
+  error: string | null;
+  created_at: string;
+  can_revert: boolean;
+};
+
 export type OrgConnectorView = {
   id: string;
   provider: string;
@@ -95,6 +112,21 @@ export const me = {
       agent_mode: "off" | "assist";
     }>("GET", "/v1/me/obligations"),
   intents: () => call<{ intents: IntentView[] }>("GET", "/v1/me/intents"),
+  actions: () => call<{ actions: ActionView[] }>("GET", "/v1/me/actions"),
+  proposeLog: (obligationId: string) =>
+    call<{ action: { id: string; diff_sha256: string } }>(
+      "POST",
+      `/v1/me/obligations/${obligationId}/log`,
+    ),
+  approveAction: (id: string, diff_sha256: string) =>
+    call<{ id: string; status: string; verified: boolean }>(
+      "POST",
+      `/v1/me/actions/${id}/approve`,
+      { diff_sha256 },
+    ),
+  declineAction: (id: string) => call<{ id: string }>("POST", `/v1/me/actions/${id}/decline`),
+  revertAction: (id: string) => call<{ id: string }>("POST", `/v1/me/actions/${id}/revert`),
+  alwaysAction: (id: string) => call<{ id: string }>("POST", `/v1/me/actions/${id}/always`),
   stateIntent: (text: string) => call<{ intent: IntentView }>("POST", "/v1/me/intents", { text }),
   retireIntent: (id: string) => call<{ id: string }>("POST", `/v1/me/intents/${id}/retire`),
   connections: () => call<{ connections: ConnectionView[] }>("GET", "/v1/me/connections"),

@@ -1,9 +1,14 @@
 import Link from "next/link";
 import { draftsLine, explain, gmailDraftUrl, me, nextMeetingLine } from "@/lib/me";
 import {
+  alwaysActionAction,
+  approveActionAction,
+  declineActionAction,
   dismissAction,
   draftAction,
   forgetIntentAction,
+  proposeLogAction,
+  revertActionAction,
   snoozeAction,
   stateIntentAction,
   syncAction,
@@ -18,10 +23,11 @@ const KIND_LABEL = {
 } as const;
 
 export default async function InboxPage() {
-  const [obligations, connections, intents] = await Promise.all([
+  const [obligations, connections, intents, actions] = await Promise.all([
     me.obligations(),
     me.connections(),
     me.intents(),
+    me.actions(),
   ]);
 
   if (!connections.ok || !obligations.ok) {
@@ -57,6 +63,9 @@ export default async function InboxPage() {
   const agentMode = obligations.data.agent_mode;
   const known = intents.ok ? intents.data.intents : [];
   const week = draftsLine(obligations.data.drafts_this_week);
+  const crm = actions.ok ? actions.data.actions : [];
+  const proposals = crm.filter((a) => a.status === "proposed");
+  const done = crm.filter((a) => a.status !== "proposed" && a.status !== "declined").slice(0, 8);
   const ready = items.filter((o) => o.draft !== null).length;
   return (
     <>
@@ -129,6 +138,13 @@ export default async function InboxPage() {
                     </button>
                   </form>
                 )}
+                {o.reason.last_direction === "outbound" ? (
+                  <form action={proposeLogAction.bind(null, o.id)}>
+                    <button className="button secondary" type="submit">
+                      Log to Salesforce
+                    </button>
+                  </form>
+                ) : null}
                 <form action={snoozeAction.bind(null, o.id)}>
                   <button className="button secondary" type="submit">
                     Snooze 3 days
@@ -156,6 +172,74 @@ export default async function InboxPage() {
         &ldquo;Draft follow-up&rdquo; saves a draft in your Gmail Drafts folder. Nothing is sent
         until you open it and press Send.
       </p>
+
+      {proposals.length > 0 || done.length > 0 ? (
+        <section className="section">
+          <div className="section-head">
+            <h2>Salesforce</h2>
+            <p className="muted">
+              What your agent would record for the team. Nothing is written until you approve it,
+              and every write is read back before it counts. &ldquo;Always&rdquo; lets it log your
+              sent emails without asking; you can undo any one.
+            </p>
+          </div>
+          <ul className="quiet-list">
+            {proposals.map((a) => (
+              <li key={a.id} className="proposal">
+                <div className="proposal-main">
+                  <span className="name">{a.summary}</span>
+                  <span className="fine">{a.detail}</span>
+                </div>
+                <div className="proposal-actions">
+                  <form action={approveActionAction.bind(null, a.id, a.diff_sha256)}>
+                    <button className="button" type="submit">
+                      Approve
+                    </button>
+                  </form>
+                  <form action={alwaysActionAction.bind(null, a.id)}>
+                    <button className="button secondary" type="submit">
+                      Always
+                    </button>
+                  </form>
+                  <form action={declineActionAction.bind(null, a.id)}>
+                    <button className="button quiet" type="submit">
+                      Not now
+                    </button>
+                  </form>
+                </div>
+              </li>
+            ))}
+            {done.map((a) => (
+              <li key={a.id}>
+                <span
+                  className={`status ${a.status === "verified" ? "ok" : a.status === "reverted" ? "none" : a.status === "failed" || a.status === "stale" ? "bad" : "warn"}`}
+                >
+                  {a.status === "verified"
+                    ? a.approved_by === "promotion"
+                      ? "Logged, verified"
+                      : "Logged, verified"
+                    : a.status === "reverted"
+                      ? "Undone"
+                      : a.status === "failed"
+                        ? "Not written"
+                        : a.status === "stale"
+                          ? "Changed since you saw it"
+                          : a.status}
+                </span>
+                <span> {a.summary}</span>
+                {a.error ? <span className="fine"> {a.error}</span> : null}
+                {a.can_revert && a.status !== "reverted" ? (
+                  <form action={revertActionAction.bind(null, a.id)}>
+                    <button type="submit" className="link">
+                      Undo
+                    </button>
+                  </form>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {skipped.length > 0 ? (
         <section className="section">

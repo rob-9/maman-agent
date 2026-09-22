@@ -918,6 +918,9 @@ importers:
       '@maman/obligation-engine':
         specifier: workspace:*
         version: link:../obligation-engine
+      '@maman/policy-engine':
+        specifier: workspace:*
+        version: link:../policy-engine
       '@maman/voice-engine':
         specifier: workspace:*
         version: link:../voice-engine

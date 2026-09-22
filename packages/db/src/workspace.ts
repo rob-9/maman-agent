@@ -934,6 +934,180 @@ export async function listSkippedObligations(
   });
 }
 
+// ---------- actions: writes to a system of record ----------
+
+export type ActionStatus =
+  "proposed" | "approved" | "applied" | "verified" | "failed" | "stale" | "declined" | "reverted";
+
+export type ActionRow = {
+  id: string;
+  kind: string;
+  status: ActionStatus;
+  thread_id: string | null;
+  contact_id: string | null;
+  message_external_id: string | null;
+  diff: unknown;
+  diff_sha256: string;
+  shape_sha256: string;
+  evidence: unknown;
+  idempotency_key: string;
+  approved_by: "user" | "promotion" | null;
+  approved_at: string | null;
+  applied_at: string | null;
+  external_id: string | null;
+  verification: unknown;
+  verified_at: string | null;
+  revert: unknown;
+  reverted_at: string | null;
+  error: string | null;
+  created_at: string;
+};
+
+const iso = (d: Date | string | null): string | null => (d ? new Date(d).toISOString() : null);
+
+function toActionRow(r: typeof schema.actions.$inferSelect): ActionRow {
+  return {
+    id: r.id,
+    kind: r.kind,
+    status: r.status,
+    thread_id: r.thread_id,
+    contact_id: r.contact_id,
+    message_external_id: r.message_external_id,
+    diff: r.diff,
+    diff_sha256: r.diff_sha256,
+    shape_sha256: r.shape_sha256,
+    evidence: r.evidence,
+    idempotency_key: r.idempotency_key,
+    approved_by: r.approved_by,
+    approved_at: iso(r.approved_at),
+    applied_at: iso(r.applied_at),
+    external_id: r.external_id,
+    verification: r.verification,
+    verified_at: iso(r.verified_at),
+    revert: r.revert,
+    reverted_at: iso(r.reverted_at),
+    error: r.error,
+    created_at: new Date(r.created_at).toISOString(),
+  };
+}
+
+export async function createAction(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    kind: string;
+    thread_id?: string | null;
+    contact_id?: string | null;
+    message_external_id?: string | null;
+    diff: unknown;
+    diff_sha256: string;
+    shape_sha256: string;
+    evidence: unknown;
+    idempotency_key: string;
+  },
+): Promise<ActionRow> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx)
+      .insert(schema.actions)
+      .values({
+        id: uuidv7(),
+        organization_id: ctx.organizationId,
+        owner_user_id: ctx.userId,
+        kind: input.kind,
+        status: "proposed",
+        thread_id: input.thread_id ?? null,
+        contact_id: input.contact_id ?? null,
+        message_external_id: input.message_external_id ?? null,
+        diff: input.diff,
+        diff_sha256: input.diff_sha256,
+        shape_sha256: input.shape_sha256,
+        evidence: input.evidence,
+        idempotency_key: input.idempotency_key,
+      })
+      .returning();
+    return toActionRow(row!);
+  });
+}
+
+export async function getAction(sql: Sql, ctx: UserContext, id: string): Promise<ActionRow | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx).select().from(schema.actions).where(eq(schema.actions.id, id));
+    return row ? toActionRow(row) : null;
+  });
+}
+
+/** An action already proposed or done for this message and kind, so a sweep never proposes it twice. */
+export async function findActionForMessage(
+  sql: Sql,
+  ctx: UserContext,
+  kind: string,
+  messageExternalId: string,
+): Promise<ActionRow | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx)
+      .select()
+      .from(schema.actions)
+      .where(
+        and(
+          eq(schema.actions.kind, kind),
+          eq(schema.actions.message_external_id, messageExternalId),
+        ),
+      )
+      .orderBy(desc(schema.actions.created_at))
+      .limit(1);
+    return row ? toActionRow(row) : null;
+  });
+}
+
+export async function listActions(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { limit?: number } = {},
+): Promise<ActionRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.actions)
+      .orderBy(desc(schema.actions.created_at))
+      .limit(opts.limit ?? 50);
+    return rows.map(toActionRow);
+  });
+}
+
+/**
+ * Moves an action forward. `from` guards the transition: an approve on a
+ * row that is no longer proposed, or an apply on one that is no longer
+ * approved, changes nothing and returns null. That is the exactly-once
+ * discipline at the ledger.
+ */
+export async function transitionAction(
+  sql: Sql,
+  ctx: UserContext,
+  id: string,
+  from: readonly ActionStatus[],
+  set: Partial<{
+    status: ActionStatus;
+    approved_by: "user" | "promotion";
+    approved_at: string;
+    applied_at: string;
+    external_id: string;
+    verification: unknown;
+    verified_at: string;
+    revert: unknown;
+    reverted_at: string;
+    error: string | null;
+  }>,
+): Promise<ActionRow | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const [row] = await db(tx)
+      .update(schema.actions)
+      .set({ ...set, updated_at: rawSql`now()` })
+      .where(and(eq(schema.actions.id, id), inArray(schema.actions.status, [...from])))
+      .returning();
+    return row ? toActionRow(row) : null;
+  });
+}
+
 // ---------- the intent store ----------
 
 export type IntentRow = {

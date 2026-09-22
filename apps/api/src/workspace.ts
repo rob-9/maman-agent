@@ -16,11 +16,17 @@ import {
   verifyState,
   type TokenTransport,
 } from "@maman/connector-auth";
-import { fetchTransport, gmailContentReader, type HttpTransport } from "@maman/connector-adapters";
+import {
+  fetchTransport,
+  gmailContentReader,
+  salesforceActivityWriter,
+  type HttpTransport,
+} from "@maman/connector-adapters";
 import {
   createUserConnection,
   draftOutcomes,
   getObligationForDraft,
+  getThreadMessages,
   listPendingObligations,
   listUserConnections,
   setObligationOutcome,
@@ -29,9 +35,17 @@ import {
 import {
   createOrgVaultCredentialProvider,
   createUserVaultCredentialProvider,
+  applyAction,
+  approveAction,
+  declineAction,
   forgetIntent,
+  listActionViews,
   listIntentViews,
+  orgPolicyResolver,
+  promoteAction,
+  proposeActivityLog,
   resolveDealSource,
+  revertAction,
   runDraftJob,
   skippedWithReasons,
   stateIntent,
@@ -122,6 +136,23 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
           ...(env.SALESFORCE_CLIENT_SECRET ? { client_secret: env.SALESFORCE_CLIENT_SECRET } : {}),
         }
       : null;
+  /** Writes to the organization's CRM: the org vault, the org's policy, this person's ledger. */
+  const actionDeps = (sql: Sql) => ({
+    sql,
+    contentKey: master,
+    writer: salesforceActivityWriter({
+      credentials: createOrgVaultCredentialProvider({
+        sql,
+        masterKey: master,
+        transport: tokenTransport,
+        clientCredentials: orgClientFor,
+      }),
+      transport: crmTransport,
+    }),
+    orgPolicy: orgPolicyResolver(sql),
+    now,
+  });
+
   /** The organization's CRM, looked up per sync; the org vault, never the user's. */
   const dealsFor = (sql: Sql) =>
     resolveDealSource({
@@ -288,6 +319,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         // derived key that opens their mailbox token.
         contentKey: master,
         deals: dealsFor(sql),
+        actions: actionDeps(sql),
         // The agent pass runs only when switched on; off means the list is
         // the deterministic ranking, exactly as before the agent existed.
         ...(agentOn
@@ -418,6 +450,107 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     const ok = await forgetIntent({ sql: deps.sql, contentKey: master }, userCtx(principal), id);
     if (!ok) return reply.status(404).send({ status: 404, title: "Not Found" });
     return { id, status: "retired" };
+  });
+
+  // ---- actions: writes to the organization's CRM, with the receipts ----
+
+  app.get("/v1/me/actions", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    return { actions: await listActionViews(actionDeps(deps.sql), userCtx(principal)) };
+  });
+
+  /** Proposes logging the last email the person sent on this thread. */
+  app.post("/v1/me/obligations/:id/log", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const ctx = userCtx(principal);
+    const id = (req.params as { id: string }).id;
+    const target = await getObligationForDraft(deps.sql, ctx, id);
+    if (!target) return reply.status(404).send({ status: 404, title: "Not Found" });
+    const messages = await getThreadMessages(deps.sql, ctx, target.thread.id);
+    const sent = [...messages].reverse().find((m) => m.direction === "outbound");
+    if (!sent) return reply.status(409).send({ status: 409, reason: "nothing_sent" });
+    const proposed = await proposeActivityLog(actionDeps(deps.sql), ctx, {
+      thread_id: target.thread.id,
+      contact_id: target.contact.id,
+      contact_email: target.contact.external_id,
+      contact_display_name: target.contact.display_name,
+      subject: target.thread.subject,
+      message_external_id: sent.external_id,
+      sent_at: sent.sent_at,
+    });
+    if ("ok" in proposed) return reply.status(409).send({ status: 409, reason: proposed.reason });
+    return {
+      action: { id: proposed.id, diff_sha256: proposed.diff_sha256, status: proposed.status },
+    };
+  });
+
+  const approveBody = z.object({ diff_sha256: z.string().min(1) }).strict();
+
+  /** Approval bound to the diff's hash; applied at once; verified by read-back. */
+  app.post("/v1/me/actions/:id/approve", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const body = approveBody.safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+    const ctx = userCtx(principal);
+    const id = (req.params as { id: string }).id;
+    const approved = await approveAction(actionDeps(deps.sql), ctx, id, body.data.diff_sha256);
+    if (!approved.ok) {
+      if (approved.reason === "not_found")
+        return reply.status(404).send({ status: 404, title: "Not Found" });
+      return reply.status(409).send({ status: 409, reason: approved.reason });
+    }
+    const applied = await applyAction(actionDeps(deps.sql), ctx, id);
+    return {
+      id,
+      status: applied.action?.status ?? "failed",
+      verified: applied.ok,
+      ...(applied.ok ? { external_id: applied.action.external_id } : { reason: applied.reason }),
+    };
+  });
+
+  app.post("/v1/me/actions/:id/decline", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const id = (req.params as { id: string }).id;
+    const ok = await declineAction(actionDeps(deps.sql), userCtx(principal), id);
+    if (!ok) return reply.status(404).send({ status: 404, title: "Not Found" });
+    return { id, status: "declined" };
+  });
+
+  app.post("/v1/me/actions/:id/revert", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const id = (req.params as { id: string }).id;
+    const r = await revertAction(actionDeps(deps.sql), userCtx(principal), id);
+    if (!r.ok) {
+      if (r.reason === "not_found")
+        return reply.status(404).send({ status: 404, title: "Not Found" });
+      return reply.status(409).send({ status: 409, reason: r.reason });
+    }
+    return { id, status: r.action.status };
+  });
+
+  /** "Always do this": a promotion, kept as the person's own standing instruction. */
+  app.post("/v1/me/actions/:id/always", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const id = (req.params as { id: string }).id;
+    const r = await promoteAction(actionDeps(deps.sql), userCtx(principal), id);
+    if (!r.ok) {
+      if (r.reason === "not_found")
+        return reply.status(404).send({ status: 404, title: "Not Found" });
+      return reply.status(409).send({ status: 409, reason: r.reason });
+    }
+    return { id, intent_id: r.intent_id };
   });
 
   // ---- drafting: the first write, and the only kind the demo performs ----

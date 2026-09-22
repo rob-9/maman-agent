@@ -3,6 +3,7 @@ import {
   applyIntentRules,
   parseIntentRule,
   predraftAllowed,
+  promotionFor,
   resolveScope,
   type ContactRef,
 } from "../src/intents.js";
@@ -180,6 +181,71 @@ describe("'don't draft for me'", () => {
     expect(predraftAllowed(rules, contacts[0], "awaiting_them")).toBe(false);
     expect(predraftAllowed(rules, contacts[1], "awaiting_them")).toBe(true);
     expect(predraftAllowed([], contacts[0], "awaiting_them")).toBe(true);
+    const ob = {
+      thread_id: "t",
+      contact_id: "c-sarah",
+      kind: "awaiting_them" as const,
+      rank: 1,
+      reason: {
+        kind: "awaiting_them" as const,
+        days_elapsed: 6,
+        threshold_days: 5,
+        last_direction: "outbound" as const,
+        message_count: 1,
+        has_open_deal: null,
+      },
+    };
+    expect(
+      applyIntentRules([ob], rules, new Map([["c-sarah", contacts[0]!]]), new Map()).skipped,
+    ).toEqual([]);
+  });
+});
+
+describe("a promotion", () => {
+  it("covers exactly one kind and one shape, within its scope, and never sets a detection aside", () => {
+    const rules = [
+      {
+        id: "p",
+        rule: {
+          kind: "auto_action" as const,
+          action_kind: "salesforce.log_activity",
+          shape_sha256: "abc",
+          scope: { kind: "account" as const, value: "Acme" },
+        },
+      },
+    ];
+    expect(
+      promotionFor(
+        rules,
+        { kind: "salesforce.log_activity", shape_sha256: "abc" },
+        contacts[0],
+        "awaiting_them",
+      )?.id,
+    ).toBe("p");
+    expect(
+      promotionFor(
+        rules,
+        { kind: "salesforce.log_activity", shape_sha256: "xyz" },
+        contacts[0],
+        "awaiting_them",
+      ),
+    ).toBeUndefined();
+    expect(
+      promotionFor(
+        rules,
+        { kind: "salesforce.update_stage", shape_sha256: "abc" },
+        contacts[0],
+        "awaiting_them",
+      ),
+    ).toBeUndefined();
+    expect(
+      promotionFor(
+        rules,
+        { kind: "salesforce.log_activity", shape_sha256: "abc" },
+        contacts[1],
+        "awaiting_them",
+      ),
+    ).toBeUndefined();
     const ob = {
       thread_id: "t",
       contact_id: "c-sarah",

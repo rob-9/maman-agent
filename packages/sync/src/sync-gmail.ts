@@ -24,6 +24,7 @@ import { activeRules } from "./intents.js";
 import type { DealSourceResolver } from "./deal-source.js";
 import { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
 import { runPredraft, type PredraftResult } from "./predraft.js";
+import { autoActions, sentFromMatchedDrafts, type ActionDeps } from "./actions.js";
 import type { ContextComposer } from "@maman/voice-engine";
 import { toSyncedMessage } from "./content.js";
 import { matchSentDrafts } from "./voice.js";
@@ -65,6 +66,12 @@ export type GmailSyncJobDeps = {
   agent?: AgentDeps | undefined;
   /** Drafts written before being asked, after the agent pass. Absent → none. */
   predraft?: { composer: ContextComposer; max: number } | undefined;
+  /**
+   * Writes to the organization's CRM for what the person sent. Absent → no
+   * action is ever proposed. Present → proposed for every draft matched to a
+   * sent message, and applied without asking only under a promotion.
+   */
+  actions?: Pick<ActionDeps, "writer" | "orgPolicy"> | undefined;
 };
 
 export type DealStepResult =
@@ -93,6 +100,7 @@ export type GmailSyncJobResult =
       deals: DealStepResult;
       agent: AgentPassResult | null;
       predraft: PredraftResult | null;
+      actions: { proposed: number; auto_applied: number; auto_failed: number } | null;
     }
   | { ok: false; reason: "no_connection" | "sync_failed"; error?: string };
 
@@ -159,6 +167,16 @@ export async function runGmailSyncJob(
 
   // What the person sent from a draft is now in the store; record how close it was.
   const matchedDrafts = await matchSentDrafts({ sql: deps.sql, contentKey: deps.contentKey }, ctx);
+
+  // What the person sent is worth recording where the team can see it. A
+  // proposal each; applied without asking only under their own promotion.
+  const actions = deps.actions
+    ? await autoActions(
+        { ...deps.actions, sql: deps.sql, contentKey: deps.contentKey, now: deps.now },
+        ctx,
+        await sentFromMatchedDrafts({ sql: deps.sql }, ctx, matchedDrafts.items),
+      )
+    : null;
 
   // The CRM's answer, if there is a CRM. A CRM that is down must not take the
   // mailbox down with it: the sync completes on whatever deal state the
@@ -242,6 +260,7 @@ export async function runGmailSyncJob(
     deals,
     agent,
     predraft,
+    actions,
   };
 }
 

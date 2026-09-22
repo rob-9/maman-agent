@@ -156,10 +156,40 @@ const gmailTransport = async (req: HttpRequest): Promise<HttpResponse> => {
   return { status: 200, headers: {}, body: MAILBOX[id] };
 };
 
-/** The organization's Salesforce, scripted: Bob is on a $40K open opportunity. */
+/** The organization's Salesforce, scripted: Bob is on a $40K open opportunity; tasks can be written. */
 const crmRequests: HttpRequest[] = [];
+const sfTasks = new Map<string, Record<string, unknown>>();
 const crmTransport = async (req: HttpRequest): Promise<HttpResponse> => {
   crmRequests.push(req);
+  const url = new URL(req.url);
+  const q = url.searchParams.get("q") ?? "";
+  if (q.includes("FROM Contact ")) {
+    return q.includes("bob@client.com")
+      ? { status: 200, headers: {}, body: { records: [{ Id: "003BOB", AccountId: "001CL" }] } }
+      : { status: 200, headers: {}, body: { records: [] } };
+  }
+  if (q.includes("FROM OpportunityContactRole WHERE ContactId")) {
+    return { status: 200, headers: {}, body: { records: [{ OpportunityId: "006DEAL" }] } };
+  }
+  if (q.includes("Description LIKE")) {
+    const m = /'%(\[maman:[^%]+\])%'/.exec(q)?.[1] ?? "";
+    const hit = [...sfTasks.values()].find((t) => String(t["Description"]).includes(m));
+    return { status: 200, headers: {}, body: { records: hit ? [hit] : [] } };
+  }
+  if (req.method === "POST" && url.pathname.endsWith("/sobjects/Task")) {
+    const id = `00T${sfTasks.size + 1}`;
+    sfTasks.set(id, { Id: id, ...(JSON.parse(req.body!) as Record<string, unknown>) });
+    return { status: 201, headers: {}, body: { id, success: true } };
+  }
+  const taskMatch = /\/sobjects\/Task\/([^?]+)/.exec(url.pathname);
+  if (taskMatch && req.method === "GET") {
+    const t = sfTasks.get(decodeURIComponent(taskMatch[1]!));
+    return t ? { status: 200, headers: {}, body: t } : { status: 404, headers: {}, body: {} };
+  }
+  if (taskMatch && req.method === "DELETE") {
+    sfTasks.delete(decodeURIComponent(taskMatch[1]!));
+    return { status: 204, headers: {}, body: "" };
+  }
   return {
     status: 200,
     headers: {},
@@ -798,5 +828,133 @@ describe("the intent store over HTTP", () => {
         })
       ).statusCode,
     ).toBe(400);
+  });
+});
+
+describe("the agent acts over HTTP: logging to Salesforce", () => {
+  let actionId = "";
+  let diffSha = "";
+
+  it("'Log to Salesforce' on a thread the person wrote on proposes the write; nothing is written yet", async () => {
+    await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`UPDATE obligations SET outcome = 'pending', snoozed_until = NULL`,
+    );
+    const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
+    const proposal = (list.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["subject"] === "Proposal",
+    )!;
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${proposal["id"]}/log`,
+      headers: as(alice),
+    });
+    expect(res.statusCode).toBe(200);
+    actionId = res.json().action.id;
+    diffSha = res.json().action.diff_sha256;
+    expect(sfTasks.size).toBe(0);
+    const actions = await app.inject({ method: "GET", url: "/v1/me/actions", headers: as(alice) });
+    expect(actions.json().actions[0]).toMatchObject({
+      id: actionId,
+      status: "proposed",
+      summary: "Log to Salesforce: Email: Proposal",
+    });
+    // A thread where the other side wrote last has nothing of hers to log.
+    const pricing = (list.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["subject"] === "Enterprise pricing",
+    )!;
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/v1/me/obligations/${pricing["id"]}/log`,
+          headers: as(alice),
+        })
+      ).statusCode,
+    ).toBe(409);
+    // Bob sees no actions and cannot touch hers.
+    expect(
+      (await app.inject({ method: "GET", url: "/v1/me/actions", headers: as(bob) })).json().actions,
+    ).toEqual([]);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/v1/me/actions/${actionId}/approve`,
+          headers: as(bob),
+          payload: { diff_sha256: diffSha },
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+
+  it("approval with the wrong hash is refused as stale; with the right one the write lands, verified, with the org token", async () => {
+    const stale = await app.inject({
+      method: "POST",
+      url: `/v1/me/actions/${actionId}/approve`,
+      headers: as(alice),
+      payload: { diff_sha256: "f".repeat(64) },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().reason).toBe("stale");
+    expect(sfTasks.size).toBe(0);
+    // Propose again (the stale one is spent).
+    const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
+    const proposal = (list.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["subject"] === "Proposal",
+    )!;
+    const again = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${proposal["id"]}/log`,
+      headers: as(alice),
+    });
+    actionId = again.json().action.id;
+    diffSha = again.json().action.diff_sha256;
+    crmRequests.length = 0;
+    const ok = await app.inject({
+      method: "POST",
+      url: `/v1/me/actions/${actionId}/approve`,
+      headers: as(alice),
+      payload: { diff_sha256: diffSha },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({ status: "verified", verified: true, external_id: "00T1" });
+    expect(sfTasks.get("00T1")).toMatchObject({
+      WhoId: "003BOB",
+      WhatId: "006DEAL",
+      Status: "Completed",
+    });
+    expect(crmRequests.every((r) => r.headers["authorization"] === "Bearer sf-org-token")).toBe(
+      true,
+    );
+    // Read back through a GET on the task, not the create's answer.
+    expect(
+      crmRequests.some((r) => r.method === "GET" && /\/sobjects\/Task\/00T1/.test(r.url)),
+    ).toBe(true);
+  });
+
+  it("undo deletes it; 'always' becomes a standing instruction the person can see", async () => {
+    const undo = await app.inject({
+      method: "POST",
+      url: `/v1/me/actions/${actionId}/revert`,
+      headers: as(alice),
+    });
+    expect(undo.statusCode).toBe(200);
+    expect(undo.json().status).toBe("reverted");
+    expect(sfTasks.has("00T1")).toBe(false);
+    const always = await app.inject({
+      method: "POST",
+      url: `/v1/me/actions/${actionId}/always`,
+      headers: as(alice),
+    });
+    expect(always.statusCode).toBe(200);
+    const intents = (
+      await app.inject({ method: "GET", url: "/v1/me/intents", headers: as(alice) })
+    ).json().intents as Array<Record<string, unknown>>;
+    expect(intents[0]).toMatchObject({
+      is_rule: true,
+      text: "Always log the emails I send to Salesforce, without asking.",
+    });
   });
 });

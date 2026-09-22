@@ -84,3 +84,10 @@ export {
   type CalendarSyncOptions,
   type CalendarSyncResult,
 } from "./calendar.js";
+export {
+  salesforceActivityWriter,
+  type ActivityTask,
+  type SalesforceActivityConfig,
+  type SalesforceActivityWriter,
+  type TaskRecord,
+} from "./salesforce-activity.js";

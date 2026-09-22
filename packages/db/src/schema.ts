@@ -479,6 +479,45 @@ export const messages = pgTable("messages", {
   updated_at: utc("updated_at").notNull().defaultNow(),
 });
 
+/** A proposed write to a system of record, and everything that happened to it. See migration 0016. */
+export const actions = pgTable("actions", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  kind: text("kind").notNull(),
+  status: text("status", {
+    enum: [
+      "proposed",
+      "approved",
+      "applied",
+      "verified",
+      "failed",
+      "stale",
+      "declined",
+      "reverted",
+    ],
+  }).notNull(),
+  thread_id: uuid("thread_id"),
+  contact_id: uuid("contact_id"),
+  message_external_id: text("message_external_id"),
+  diff: jsonb("diff").notNull(),
+  diff_sha256: text("diff_sha256").notNull(),
+  shape_sha256: text("shape_sha256").notNull(),
+  evidence: jsonb("evidence").notNull(),
+  idempotency_key: text("idempotency_key").notNull(),
+  approved_by: text("approved_by", { enum: ["user", "promotion"] }),
+  approved_at: utc("approved_at"),
+  applied_at: utc("applied_at"),
+  external_id: text("external_id"),
+  verification: jsonb("verification"),
+  verified_at: utc("verified_at"),
+  revert: jsonb("revert"),
+  reverted_at: utc("reverted_at"),
+  error: text("error"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
 /** The intent store. See migration 0014. */
 export const intents = pgTable("intents", {
   id: uuid("id").primaryKey(),

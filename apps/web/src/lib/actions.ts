@@ -84,3 +84,34 @@ export async function disconnectOrgAction(provider: string): Promise<void> {
   revalidatePath("/connections");
   revalidatePath("/");
 }
+
+/** "Log to Salesforce" on a card: a proposal the person then approves. */
+export async function proposeLogAction(obligationId: string): Promise<void> {
+  const res = await me.proposeLog(obligationId);
+  if (!res.ok) throw new Error(`nothing to log (${res.detail ?? res.status})`);
+  revalidatePath("/");
+}
+
+/** Approval is bound to the exact diff shown; the write happens at once and is read back. */
+export async function approveActionAction(id: string, diffSha256: string): Promise<void> {
+  const res = await me.approveAction(id, diffSha256);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not apply (${res.detail ?? res.status})`);
+}
+
+export async function declineActionAction(id: string): Promise<void> {
+  await me.declineAction(id);
+  revalidatePath("/");
+}
+
+export async function revertActionAction(id: string): Promise<void> {
+  const res = await me.revertAction(id);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not undo (${res.detail ?? res.status})`);
+}
+
+export async function alwaysActionAction(id: string): Promise<void> {
+  const res = await me.alwaysAction(id);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not set that up (${res.detail ?? res.status})`);
+}

@@ -59,11 +59,13 @@ export async function stateIntent(
   text: string,
   source: IntentRow["source"] = "stated",
   origin?: unknown,
+  /** A rule the product built itself (a promotion). Otherwise parsed from the sentence. */
+  explicitRule?: IntentRule,
 ): Promise<IntentView> {
   const clean = text.replace(/\s+/g, " ").trim().slice(0, MAX_TEXT);
   if (clean.length === 0) throw new Error("intent text is empty");
   const contacts = await contactRefs(deps, ctx);
-  const rule = parseIntentRule(clean, contacts);
+  const rule = explicitRule ?? parseIntentRule(clean, contacts);
   const scope: IntentScope = rule ? rule.scope : resolveScope(clean, contacts);
   const { id } = await createIntent(deps.sql, ctx, {
     text_ciphertext: encryptBody(clean, deps.contentKey, ctx),

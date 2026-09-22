@@ -31,6 +31,19 @@ import { meetingContext } from "../../src/meetings.js";
 import { intentsFor, listIntentViews, skippedWithReasons, stateIntent } from "../../src/intents.js";
 import { DeterministicModelProvider } from "@maman/model-provider";
 import { deterministicContextComposer } from "@maman/voice-engine";
+import { salesforceActivityWriter, type CredentialProvider } from "@maman/connector-adapters";
+import { DEFAULT_ORG_POLICY, orgPolicySchema } from "@maman/policy-engine";
+import { recordDraft as recordDraftRow, listActions, verifyAuditChain } from "@maman/db";
+import {
+  applyAction,
+  approveAction,
+  declineAction,
+  listActionViews,
+  promoteAction,
+  proposeActivityLog,
+  revertAction,
+  sentFromMatchedDrafts,
+} from "../../src/actions.js";
 import { recordDraft, draftOutcomes } from "@maman/db";
 
 /**
@@ -1040,5 +1053,282 @@ describe("drafts written before being asked", () => {
       (o) => o.subject === "Enterprise pricing",
     )!;
     expect(pricing.draft).toBeNull();
+  });
+});
+
+describe("the agent acts: logging a sent email to Salesforce", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  /** A scripted Salesforce org: contacts, one open opportunity, a task store. */
+  const sf = {
+    tasks: new Map<string, Record<string, unknown>>(),
+    created: 0,
+    createStatus: 201,
+    readBackWho: null as string | null,
+  };
+  const sfTransport = async (req: HttpRequest): Promise<HttpResponse> => {
+    const url = new URL(req.url);
+    const q = url.searchParams.get("q") ?? "";
+    if (q.includes("FROM Contact")) {
+      return q.includes("bob@client.com")
+        ? { status: 200, headers: {}, body: { records: [{ Id: "003BOB", AccountId: "001CL" }] } }
+        : { status: 200, headers: {}, body: { records: [] } };
+    }
+    if (q.includes("FROM OpportunityContactRole"))
+      return { status: 200, headers: {}, body: { records: [{ OpportunityId: "006DEAL" }] } };
+    if (q.includes("Description LIKE")) {
+      const m = /'%(\[maman:[^%]+\])%'/.exec(q)?.[1] ?? "";
+      const hit = [...sf.tasks.values()].find((t) => String(t["Description"]).includes(m));
+      return { status: 200, headers: {}, body: { records: hit ? [hit] : [] } };
+    }
+    if (req.method === "POST" && url.pathname.endsWith("/sobjects/Task")) {
+      sf.created += 1;
+      if (sf.createStatus !== 201)
+        return { status: sf.createStatus, headers: {}, body: [{ errorCode: "X", message: "no" }] };
+      const id = `00T${sf.created}`;
+      const body = JSON.parse(req.body!) as Record<string, unknown>;
+      sf.tasks.set(id, { Id: id, ...body, ...(sf.readBackWho ? { WhoId: sf.readBackWho } : {}) });
+      return { status: 201, headers: {}, body: { id, success: true } };
+    }
+    const taskMatch = /\/sobjects\/Task\/([^?]+)/.exec(url.pathname);
+    if (taskMatch && req.method === "GET") {
+      const t = sf.tasks.get(decodeURIComponent(taskMatch[1]!));
+      return t ? { status: 200, headers: {}, body: t } : { status: 404, headers: {}, body: {} };
+    }
+    if (taskMatch && req.method === "DELETE") {
+      sf.tasks.delete(decodeURIComponent(taskMatch[1]!));
+      return { status: 204, headers: {}, body: "" };
+    }
+    return { status: 404, headers: {}, body: {} };
+  };
+  const orgCreds: CredentialProvider = {
+    load: async () => ({ access_token: "sf-tok", instance_url: "https://na1.example.com" }),
+    refresh: async () => ({ access_token: "sf-tok", instance_url: "https://na1.example.com" }),
+  };
+  let policy = DEFAULT_ORG_POLICY;
+  const adeps = () => ({
+    sql: client.sql,
+    contentKey: master,
+    writer: salesforceActivityWriter({ credentials: orgCreds, transport: sfTransport }),
+    orgPolicy: async () => policy,
+    now: () => NOW,
+  });
+  const sentBob = {
+    thread_id: "",
+    contact_id: "",
+    contact_email: "bob@client.com",
+    contact_display_name: "Bob",
+    contact_account_name: "Client Co" as string | null,
+    subject: "Proposal",
+    message_external_id: "waiting-sent",
+    sent_at: NOW.toISOString(),
+  };
+
+  it("proposes from what was sent, with the exact diff and its hash, never twice for one message", async () => {
+    const t = await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`SELECT t.id, t.contact_id FROM threads t WHERE t.external_id = 'waiting'`,
+    );
+    sentBob.thread_id = t[0]!["id"] as string;
+    sentBob.contact_id = t[0]!["contact_id"] as string;
+    const proposed = await proposeActivityLog(adeps(), ctx, sentBob);
+    expect("ok" in proposed).toBe(false);
+    if ("ok" in proposed) return;
+    expect(proposed.status).toBe("proposed");
+    expect(proposed.diff).toMatchObject({
+      kind: "salesforce.log_activity",
+      contact_email: "bob@client.com",
+      subject: "Email: Proposal",
+      activity_date: NOW.toISOString().slice(0, 10),
+    });
+    expect(proposed.diff_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(await proposeActivityLog(adeps(), ctx, sentBob)).toEqual({
+      ok: false,
+      reason: "exists",
+    });
+    // The body of the email is not in the diff: the CRM is shared.
+    expect(JSON.stringify(proposed.diff)).not.toContain("Thursday");
+  });
+
+  it("an approval that does not match the diff is stale and nothing is written", async () => {
+    const [p] = await listActions(client.sql, ctx);
+    const r = await approveAction(adeps(), ctx, p!.id, "0".repeat(64));
+    expect(r).toEqual({ ok: false, reason: "stale" });
+    expect(sf.created).toBe(0);
+    expect((await listActions(client.sql, ctx))[0]!.status).toBe("stale");
+  });
+
+  it("approve → apply exactly once → verified by an independent read; the row is the receipt; the audit chain holds", async () => {
+    const proposed = await proposeActivityLog(adeps(), ctx, sentBob);
+    if ("ok" in proposed) throw new Error("expected a proposal");
+    const approved = await approveAction(adeps(), ctx, proposed.id, proposed.diff_sha256);
+    expect(approved.ok).toBe(true);
+    const applied = await applyAction(adeps(), ctx, proposed.id);
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.action).toMatchObject({
+      status: "verified",
+      external_id: "00T1",
+      approved_by: "user",
+    });
+    expect(applied.action.verification).toMatchObject({
+      verified: true,
+      who_id: "003BOB",
+      what_id: "006DEAL",
+    });
+    expect(sf.created).toBe(1);
+    const task = sf.tasks.get("00T1")!;
+    expect(task["WhoId"]).toBe("003BOB");
+    expect(task["WhatId"]).toBe("006DEAL");
+    expect(String(task["Description"])).toContain(`[maman:${proposed.id}]`);
+    // Applying again does nothing: not approved any more.
+    expect((await applyAction(adeps(), ctx, proposed.id)).ok).toBe(false);
+    expect(sf.created).toBe(1);
+    const chain = await verifyAuditChain(client.sql, { organizationId: orgId });
+    expect(chain.valid).toBe(true);
+    const views = await listActionViews(adeps(), ctx);
+    expect(views.find((v) => v.id === proposed.id)).toMatchObject({
+      verified: true,
+      can_revert: true,
+      summary: "Log to Salesforce: Email: Proposal",
+    });
+  });
+
+  it("a retry after an unknown result finds the task by marker and does not write a second one", async () => {
+    const [latest] = await listActions(client.sql, ctx);
+    // Pretend the apply never recorded: put the action back to approved.
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE actions SET status = 'approved', external_id = NULL, verification = NULL WHERE id = ${latest!.id}`,
+    );
+    const again = await applyAction(adeps(), ctx, latest!.id);
+    expect(again.ok).toBe(true);
+    expect(sf.created).toBe(1);
+    expect(again.ok && again.action.external_id).toBe("00T1");
+  });
+
+  it("a read-back that disagrees is a failure, whatever the create call said", async () => {
+    sf.readBackWho = "003WRONG";
+    const proposed = await proposeActivityLog(adeps(), ctx, {
+      ...sentBob,
+      message_external_id: "waiting-sent-2",
+    });
+    if ("ok" in proposed) throw new Error("expected a proposal");
+    await approveAction(adeps(), ctx, proposed.id, proposed.diff_sha256);
+    const applied = await applyAction(adeps(), ctx, proposed.id);
+    sf.readBackWho = null;
+    expect(applied).toMatchObject({ ok: false, reason: "unverified" });
+    expect(applied.action).toMatchObject({ status: "failed" });
+    expect(String(applied.action?.error)).toContain("WhoId");
+  });
+
+  it("undo deletes the task and reads back that it is gone", async () => {
+    const verified = (await listActions(client.sql, ctx)).find((a) => a.status === "verified")!;
+    const r = await revertAction(adeps(), ctx, verified.id);
+    expect(r.ok).toBe(true);
+    expect(sf.tasks.has("00T1")).toBe(false);
+    expect(r.ok && r.action.status).toBe("reverted");
+  });
+
+  it("a contact Salesforce does not know is a failure with a reason, not a write to the wrong record", async () => {
+    const proposed = await proposeActivityLog(adeps(), ctx, {
+      ...sentBob,
+      contact_email: "stranger@else.com",
+      message_external_id: "waiting-sent-3",
+    });
+    if ("ok" in proposed) throw new Error("expected a proposal");
+    await approveAction(adeps(), ctx, proposed.id, proposed.diff_sha256);
+    const applied = await applyAction(adeps(), ctx, proposed.id);
+    expect(applied).toMatchObject({ ok: false, reason: "provider" });
+    expect(applied.action?.error).toBe("contact not in Salesforce");
+  });
+
+  it("'Always': a promotion the person made, applied by the sweep without asking; the org can forbid it", async () => {
+    const proposed = await proposeActivityLog(adeps(), ctx, {
+      ...sentBob,
+      message_external_id: "waiting-sent-4",
+    });
+    if ("ok" in proposed) throw new Error("expected a proposal");
+    const promoted = await promoteAction(adeps(), ctx, proposed.id);
+    expect(promoted.ok).toBe(true);
+    await declineAction(adeps(), ctx, proposed.id);
+    // A draft matched to a sent message: the sweep proposes and, promoted, applies.
+    const { autoActions } = await import("../../src/actions.js");
+    const before = sf.created;
+    const r = await autoActions(adeps(), ctx, [
+      { ...sentBob, message_external_id: "waiting-sent-5" },
+    ]);
+    expect(r).toEqual({ proposed: 1, auto_applied: 1, auto_failed: 0 });
+    expect(sf.created).toBe(before + 1);
+    const auto = (await listActions(client.sql, ctx)).find(
+      (a) => a.message_external_id === "waiting-sent-5",
+    )!;
+    expect(auto).toMatchObject({ status: "verified", approved_by: "promotion" });
+    // The organization disables the capability: proposals stop, and nothing runs.
+    policy = orgPolicySchema.parse({
+      ...DEFAULT_ORG_POLICY,
+      disabled_capabilities: ["salesforce.log_activity"],
+    });
+    const blocked = await autoActions(adeps(), ctx, [
+      { ...sentBob, message_external_id: "waiting-sent-6" },
+    ]);
+    expect(blocked).toEqual({ proposed: 0, auto_applied: 0, auto_failed: 0 });
+    policy = DEFAULT_ORG_POLICY;
+  });
+
+  it("in the sweep: a draft the person sent becomes a proposal, and a colleague sees none of it", async () => {
+    // A fresh draft on the Proposal thread, then Alice "sends" it.
+    const t = await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`SELECT id FROM threads WHERE external_id = 'waiting'`,
+    );
+    const tid = t[0]!["id"] as string;
+    const pending = await listPendingObligations(client.sql, ctx, 50);
+    const proposal = pending.find((o) => o.thread_id === tid);
+    await recordDraftRow(client.sql, ctx, {
+      obligation_id: proposal?.id ?? (null as unknown as string),
+      thread_id: tid,
+      gmail_draft_id: "gd-act",
+      subject: "Re: Proposal",
+      body_ciphertext: encryptBody("Hi Bob, checking in.", master, ctx),
+      body_chars: 20,
+      composer: "model",
+    });
+    // The earlier "sent" fixture sits a minute in the future and the sync
+    // would write it again; move it into the past in the mailbox itself so
+    // the message below is the first one after this draft.
+    const earlier = (
+      MAILBOX["waiting"] as { messages: Array<{ id: string; internalDate: string }> }
+    ).messages.find((m) => m.id === "waiting-sent");
+    if (earlier) earlier.internalDate = ago(1);
+    (MAILBOX["waiting"] as { historyId: string }).historyId = "h-waiting-act";
+    (MAILBOX["waiting"] as { messages: unknown[] }).messages.push({
+      id: "waiting-sent-7",
+      internalDate: String(Date.now() + 120_000),
+      payload: {
+        headers: [
+          { name: "From", value: "alice@co.example" },
+          { name: "To", value: "bob@client.com" },
+          { name: "Subject", value: "Re: Proposal" },
+        ],
+        mimeType: "text/plain",
+        body: { data: Buffer.from("Hi Bob, checking in!").toString("base64url") },
+      },
+    });
+    const r = await runGmailSyncJob(
+      { ...deps(), actions: { writer: adeps().writer, orgPolicy: async () => policy } },
+      ctx,
+    );
+    expect(r.ok && r.drafts_matched).toBe(1);
+    expect(r.ok && r.actions).toMatchObject({ proposed: 1 });
+    const matched = await sentFromMatchedDrafts({ sql: client.sql }, ctx, [
+      { thread_id: tid, sent_external_id: "waiting-sent-7", sent_at: NOW.toISOString() },
+    ]);
+    // The reply carried "Re: Proposal", and the thread's subject follows its last message.
+    expect(matched[0]).toMatchObject({ contact_email: "bob@client.com", subject: "Re: Proposal" });
+    expect(await listActions(client.sql, { organizationId: orgId, userId: bob })).toEqual([]);
   });
 });

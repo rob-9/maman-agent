@@ -28,6 +28,18 @@ export const intentRuleSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("no_chase"), scope: intentScopeSchema }).strict(),
   /** Do not write drafts before being asked. Clicking still works. */
   z.object({ kind: z.literal("no_predraft"), scope: intentScopeSchema }).strict(),
+  /**
+   * A promotion: run this kind of write without asking. Made by the person,
+   * bound to the shape of the write it covers (kind + field names).
+   */
+  z
+    .object({
+      kind: z.literal("auto_action"),
+      action_kind: z.string().min(1),
+      shape_sha256: z.string().min(1),
+      scope: intentScopeSchema,
+    })
+    .strict(),
   /** Stop chasing after N unanswered messages in a row. */
   z
     .object({
@@ -178,7 +190,7 @@ export function applyIntentRules(
     const contact = contactsById.get(o.contact_id);
     const chases = threadsById.get(o.thread_id)?.chase_count ?? 0;
     const hit = rules.find(({ rule }) => {
-      if (rule.kind === "no_predraft") return false;
+      if (rule.kind === "no_predraft" || rule.kind === "auto_action") return false;
       if (!inScope(rule.scope, contact, o.kind)) return false;
       if (rule.kind === "no_chase") return true;
       return chases >= rule.max;
@@ -197,5 +209,21 @@ export function predraftAllowed(
 ): boolean {
   return !rules.some(
     ({ rule }) => rule.kind === "no_predraft" && inScope(rule.scope, contact, kind),
+  );
+}
+
+/** The promotion that covers this write, if the person made one. */
+export function promotionFor(
+  rules: readonly IntentRuleRecord[],
+  action: { kind: string; shape_sha256: string },
+  contact: ContactRef | undefined,
+  obligationKind: ObligationKind,
+): IntentRuleRecord | undefined {
+  return rules.find(
+    ({ rule }) =>
+      rule.kind === "auto_action" &&
+      rule.action_kind === action.kind &&
+      rule.shape_sha256 === action.shape_sha256 &&
+      inScope(rule.scope, contact, obligationKind),
   );
 }

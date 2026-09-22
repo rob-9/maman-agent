@@ -88,12 +88,15 @@ export function similarity(draft: string, sent: string): number {
  * Record how close it was. Runs inside the person's scope; decrypts nothing
  * it does not need.
  */
+export type MatchedSent = { thread_id: string; sent_external_id: string; sent_at: string };
+
 export async function matchSentDrafts(
   deps: { sql: Sql; contentKey: Buffer },
   ctx: UserContext,
-): Promise<{ matched: number }> {
+): Promise<{ matched: number; items: MatchedSent[] }> {
   const pending = await listUnmatchedDrafts(deps.sql, ctx);
   let matched = 0;
+  const items: MatchedSent[] = [];
   for (const d of pending) {
     const messages = await getThreadMessages(deps.sql, ctx, d.thread_id);
     const sent = messages.find(
@@ -109,6 +112,11 @@ export async function matchSentDrafts(
       edit_ratio: ratio,
     });
     matched += 1;
+    items.push({
+      thread_id: d.thread_id,
+      sent_external_id: sent.external_id,
+      sent_at: sent.sent_at,
+    });
     // A rewrite is the person telling the agent something. Written down,
     // scoped to the thread, not inferred into a rule.
     if (ratio < 0.5) {
@@ -121,5 +129,5 @@ export async function matchSentDrafts(
       );
     }
   }
-  return { matched };
+  return { matched, items };
 }

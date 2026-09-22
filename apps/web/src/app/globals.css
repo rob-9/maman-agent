@@ -433,3 +433,34 @@ form.dismiss input {
 a.button {
   text-decoration: none;
 }
+
+/* what the agent would record */
+.quiet-list li.proposal {
+  align-items: flex-start;
+}
+.proposal-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.proposal-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.proposal-actions form {
+  margin: 0;
+}
+.proposal-actions .button {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+@media (max-width: 640px) {
+  .proposal-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+}
