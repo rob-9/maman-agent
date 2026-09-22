@@ -407,7 +407,7 @@ describe("/v1/me — the demo path", () => {
     expect((list.json().obligations as unknown[]).length).toBe(1);
   });
 
-  it("drafting creates a Gmail DRAFT — never a send — and marks the obligation drafted", async () => {
+  it("drafting creates a Gmail DRAFT — never a send — and attaches it to the item, which stays pending", async () => {
     const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
     const target = (list.json().obligations as Array<{ id: string; subject: string }>)[0]!;
     const before = gmailRequests.length;
@@ -437,24 +437,35 @@ describe("/v1/me — the demo path", () => {
     const sent = JSON.parse(news[0]!.body!) as { message: { threadId?: string } };
     expect(sent.message.threadId).toBeTruthy();
 
-    // It left the pending list, and the next sync does not bring it back.
+    // It stays on the list with the draft attached, and the next sync keeps
+    // it that way: the draft is waiting until she sends it.
     const after = await app.inject({
       method: "GET",
       url: "/v1/me/obligations",
       headers: as(alice),
     });
-    expect(
-      (after.json().obligations as Array<{ id: string }>).some((o) => o.id === target.id),
-    ).toBe(false);
+    const kept = (after.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["id"] === target.id,
+    )!;
+    expect(kept).toBeTruthy();
+    expect(kept["draft"]).toMatchObject({
+      gmail_draft_id: "draft-1",
+      gmail_message_id: "msg-1",
+      mode: "manual",
+    });
     await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
     const again = await app.inject({
       method: "GET",
       url: "/v1/me/obligations",
       headers: as(alice),
     });
-    expect(
-      (again.json().obligations as Array<{ id: string }>).some((o) => o.id === target.id),
-    ).toBe(false);
+    // The sweep rewrites pending rows (new ids); the thread is the stable key.
+    const still = (again.json().obligations as Array<Record<string, unknown>>).find(
+      (o) => o["thread_id"] === kept["thread_id"],
+    )!;
+    expect(still["draft"]).toMatchObject({ gmail_draft_id: "draft-1" });
+    // The week's numbers count it.
+    expect(again.json().drafts_this_week).toMatchObject({ drafted: 1, sent: 0 });
   });
 
   it("when Gmail refuses the draft, the obligation STAYS pending — never 'drafted' pointing at nothing", async () => {
@@ -464,7 +475,8 @@ describe("/v1/me — the demo path", () => {
     // Earlier tests drafted or snoozed everything; put the drafted one back so
     // there is a pending item to fail against.
     await withUser(client.sql, { organizationId: orgId, userId: alice }, async (tx) => {
-      await tx`UPDATE obligations SET outcome = 'pending' WHERE outcome = 'drafted'`;
+      await tx`UPDATE obligations SET outcome = 'pending' WHERE outcome IN ('drafted', 'snoozed')`;
+      await tx`DELETE FROM drafts`;
     });
     const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
     expect((list.json().obligations as unknown[]).length).toBeGreaterThan(0);
@@ -619,6 +631,11 @@ describe("AGENT_MODE=assist — the agent pass over HTTP", () => {
       failed: 0,
       model_alias: "demo",
     });
+    // And it wrote the drafts for what it judged owed, before anyone asked.
+    expect(res.json().predraft).toMatchObject({ drafted: 2, skipped_by_rule: 0, failed: 0 });
+    expect(
+      gmailRequests.filter((r) => r.method === "POST" && r.url.endsWith("/drafts")),
+    ).toHaveLength(2);
     // The sync fetched both threads in full and stored them encrypted; the
     // agent read the store, so the pass added no Gmail requests.
     const fetches = gmailRequests.filter((r) => /\/threads\/[^?]+\?/.test(r.url));

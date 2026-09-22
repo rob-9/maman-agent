@@ -73,6 +73,7 @@ export {
   matchDraftToSent,
   draftOutcomes,
   type DraftRecord,
+  type PendingDraft,
   type ThreadAssessment,
   type SyncedMessage,
   type StoredMessageRow,

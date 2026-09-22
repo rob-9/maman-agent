@@ -23,6 +23,8 @@ import {
 import { activeRules } from "./intents.js";
 import type { DealSourceResolver } from "./deal-source.js";
 import { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
+import { runPredraft, type PredraftResult } from "./predraft.js";
+import type { ContextComposer } from "@maman/voice-engine";
 import { toSyncedMessage } from "./content.js";
 import { matchSentDrafts } from "./voice.js";
 import { runCalendarStep, type CalendarStepResult } from "./sync-calendar.js";
@@ -61,6 +63,8 @@ export type GmailSyncJobDeps = {
    * candidates; see assess.ts for what it may and may not do.
    */
   agent?: AgentDeps | undefined;
+  /** Drafts written before being asked, after the agent pass. Absent → none. */
+  predraft?: { composer: ContextComposer; max: number } | undefined;
 };
 
 export type DealStepResult =
@@ -88,6 +92,7 @@ export type GmailSyncJobResult =
       obligations_skipped: number;
       deals: DealStepResult;
       agent: AgentPassResult | null;
+      predraft: PredraftResult | null;
     }
   | { ok: false; reason: "no_connection" | "sync_failed"; error?: string };
 
@@ -199,6 +204,25 @@ export async function runGmailSyncJob(
       )
     : null;
 
+  // Then the drafts, for what the agent judged owed. After judgment, never
+  // instead of it: a draft written for a thread nobody read is noise in
+  // the person's own Drafts folder.
+  const predraft =
+    deps.agent && deps.predraft
+      ? await runPredraft(
+          {
+            sql: deps.sql,
+            contentKey: deps.contentKey,
+            credentials: deps.credentials,
+            transport: deps.transport,
+            composer: deps.predraft.composer,
+            now: deps.now,
+            max: deps.predraft.max,
+          },
+          ctx,
+        )
+      : null;
+
   await markUserConnectionSync(deps.sql, ctx, conn.id, { ok: true, at: now });
 
   return {
@@ -217,6 +241,7 @@ export async function runGmailSyncJob(
     obligations_skipped: replaced.skipped,
     deals,
     agent,
+    predraft,
   };
 }
 

@@ -26,6 +26,8 @@ export type IntentScope = z.infer<typeof intentScopeSchema>;
 export const intentRuleSchema = z.discriminatedUnion("kind", [
   /** Do not chase (awaiting_them, unsent_followup). A reply owed is still owed. */
   z.object({ kind: z.literal("no_chase"), scope: intentScopeSchema }).strict(),
+  /** Do not write drafts before being asked. Clicking still works. */
+  z.object({ kind: z.literal("no_predraft"), scope: intentScopeSchema }).strict(),
   /** Stop chasing after N unanswered messages in a row. */
   z
     .object({
@@ -111,9 +113,13 @@ const NO_CHASE =
 const MAX_CHASES =
   /\b(?:no more than|at most|max(?:imum)?(?: of)?|not more than)\s+(\d{1,2}|once|one|twice|two|three|four|five|six|seven|eight|nine|ten)\b|\b(?:follow up|chase|nudge)\s+(?:at most|no more than)\s+(\d{1,2}|once|twice|two|three|four|five)\b|\bnever\s+(?:follow up|chase)\s+more than\s+(\d{1,2}|once|twice|two|three|four|five)\b/i;
 
+const NO_PREDRAFT =
+  /\b(don'?t|do not|never|stop|no)\s+(?:(?:write|writing|make|making|create|creating|pre-?draft|pre-?drafting)\s+)?(?:drafts?|drafting)\b/i;
+
 /** The rule a sentence states, or null when it is an instruction rather than a rule. */
 export function parseIntentRule(text: string, contacts: readonly ContactRef[]): IntentRule | null {
   const scope = resolveScope(text, contacts);
+  if (NO_PREDRAFT.test(text)) return { kind: "no_predraft", scope };
   const max = MAX_CHASES.exec(text);
   if (max) {
     const raw = (max[1] ?? max[2] ?? max[3] ?? "").toLowerCase();
@@ -172,6 +178,7 @@ export function applyIntentRules(
     const contact = contactsById.get(o.contact_id);
     const chases = threadsById.get(o.thread_id)?.chase_count ?? 0;
     const hit = rules.find(({ rule }) => {
+      if (rule.kind === "no_predraft") return false;
       if (!inScope(rule.scope, contact, o.kind)) return false;
       if (rule.kind === "no_chase") return true;
       return chases >= rule.max;
@@ -180,4 +187,15 @@ export function applyIntentRules(
     else kept.push(o);
   }
   return { kept, skipped };
+}
+
+/** Whether a "don't draft for me" rule covers this obligation. */
+export function predraftAllowed(
+  rules: readonly IntentRuleRecord[],
+  contact: ContactRef | undefined,
+  kind: ObligationKind,
+): boolean {
+  return !rules.some(
+    ({ rule }) => rule.kind === "no_predraft" && inScope(rule.scope, contact, kind),
+  );
 }

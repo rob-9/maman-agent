@@ -22,6 +22,7 @@ const o = (over: Partial<ObligationView> = {}): ObligationView => ({
   last_meeting_title: null,
   next_meeting_at: null,
   next_meeting_title: null,
+  draft: null,
   assessment: null,
   ...over,
 });

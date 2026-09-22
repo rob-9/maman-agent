@@ -353,6 +353,9 @@ importers:
       '@maman/sync':
         specifier: workspace:*
         version: link:../../packages/sync
+      '@maman/voice-engine':
+        specifier: workspace:*
+        version: link:../../packages/voice-engine
       '@temporalio/activity':
         specifier: ^1.11.5
         version: 1.20.3
@@ -915,6 +918,9 @@ importers:
       '@maman/obligation-engine':
         specifier: workspace:*
         version: link:../obligation-engine
+      '@maman/voice-engine':
+        specifier: workspace:*
+        version: link:../voice-engine
       '@temporalio/workflow':
         specifier: ^1.11.5
         version: 1.20.3

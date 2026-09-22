@@ -16,36 +16,26 @@ import {
   verifyState,
   type TokenTransport,
 } from "@maman/connector-auth";
-import {
-  createGmailDraft,
-  fetchTransport,
-  gmailContentReader,
-  type HttpTransport,
-} from "@maman/connector-adapters";
+import { fetchTransport, gmailContentReader, type HttpTransport } from "@maman/connector-adapters";
 import {
   createUserConnection,
+  draftOutcomes,
   getObligationForDraft,
-  globalGetUserById,
   listPendingObligations,
   listUserConnections,
-  recordDraft,
   setObligationOutcome,
   type UserContext,
 } from "@maman/db";
 import {
   createOrgVaultCredentialProvider,
   createUserVaultCredentialProvider,
-  encryptBody,
   forgetIntent,
-  intentsFor,
   listIntentViews,
-  meetingContext,
   resolveDealSource,
+  runDraftJob,
   skippedWithReasons,
   stateIntent,
   runGmailSyncJob,
-  storedThreadContent,
-  voiceFor,
 } from "@maman/sync";
 import { createModelProvider } from "@maman/model-provider";
 import {
@@ -77,6 +67,9 @@ import { landing } from "./connectors.js";
  * (Salesforce, HubSpot) go through /v1/connectors; a mailbox is personal.
  */
 const PERSONAL_PROVIDERS = new Set(["gmail"]);
+
+/** Drafts the sweep writes per person per sweep when the agent is on. Enough to be useful, few enough to trust. */
+const DEFAULT_PREDRAFT_PER_SWEEP = 3;
 
 // PKCE verifiers keyed by the signed state nonce, cleared on callback. Same
 // caveat as connectors.ts: a short-TTL store in production, memory here.
@@ -303,6 +296,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
                 provider: modelProvider,
                 content: gmailContentReader({ credentials, transport: gmailTransport }),
               },
+              predraft: { composer, max: env.PREDRAFT_PER_SWEEP ?? DEFAULT_PREDRAFT_PER_SWEEP },
             }
           : {}),
       },
@@ -329,6 +323,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
       obligations: await listPendingObligations(deps.sql, ctx, limit, { agent: agentOn }),
       // What the person's own rules set aside, with the rule in their words.
       skipped: await skippedWithReasons({ sql: deps.sql, contentKey: master }, ctx),
+      // The product's own measure of its drafts, for the last seven days.
+      drafts_this_week: await draftOutcomes(deps.sql, ctx, {
+        since: new Date(now().getTime() - 7 * 86_400_000),
+      }),
       agent_mode: agentOn ? "assist" : "off",
     };
   });
@@ -431,99 +429,33 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     const sql = deps.sql;
     const ctx = userCtx(principal);
     const id = (req.params as { id: string }).id;
-
-    const target = await getObligationForDraft(sql, ctx, id);
-    // Missing, decided, and someone else's are one 404.
-    if (!target) return reply.status(404).send({ status: 404, title: "Not Found" });
-
-    const reason = target.reason as { days_elapsed?: number };
-    const credentials = createUserVaultCredentialProvider({
-      sql,
-      masterKey: master,
-      transport: tokenTransport,
-      clientCredentials: clientFor,
-    });
-    // The conversation, from the store; Gmail only if the store has nothing.
-    const content =
-      (await storedThreadContent({ sql, contentKey: master }, ctx, target.thread.id)) ??
-      (await gmailContentReader({ credentials, transport: gmailTransport }).read(
-        { organization_id: ctx.organizationId, user_id: ctx.userId },
-        target.thread.external_id,
-        [],
-      ));
-    if (content.messages.length === 0) {
-      return reply.status(409).send({ status: 409, reason: "no_thread_content" });
-    }
-    const sender = await globalGetUserById(sql, ctx.userId);
-    const voice = await voiceFor({ sql, contentKey: master }, ctx, target.contact.id);
-    const meetings = await meetingContext(
-      { sql, contentKey: master },
-      ctx,
-      target.contact.external_id,
-      now(),
-    );
-    const preferences = await intentsFor({ sql, contentKey: master }, ctx, {
-      contact_address: target.contact.external_id,
-      account_name: target.contact.account_name,
-      kind: target.kind,
-    });
-    const draft = await composer.compose({
-      kind: target.kind,
-      contact_display_name: target.contact.display_name,
-      contact_address: target.contact.external_id,
-      account_name: target.contact.account_name,
-      subject: target.thread.subject,
-      days_elapsed: reason.days_elapsed ?? 0,
-      has_open_deal: target.facts.has_open_deal,
-      ...(target.facts.open_deal_value !== null
-        ? { open_deal_value: target.facts.open_deal_value }
-        : {}),
-      ...(target.facts.last_meeting_at ? { last_meeting_at: target.facts.last_meeting_at } : {}),
-      ...meetings,
-      sender_name: sender?.display_name ?? sender?.email ?? "me",
-      sender_address: sender?.email ?? "",
-      messages: content.messages.slice(-8),
-      ...(target.assessment?.ask ? { ask: target.assessment.ask } : {}),
-      ...(preferences.length > 0 ? { preferences } : {}),
-      voice,
-    });
-
-    // A DRAFT. It lands in the person's Drafts folder and nothing happens until
-    // they open it and press Send. The scope cannot send; neither can this.
-    const created = await createGmailDraft(
-      { credentials, transport: gmailTransport },
-      { organization_id: ctx.organizationId, user_id: ctx.userId },
+    // One job for a click and for the sweep (sync/draft-job.ts). The item
+    // stays pending with the draft attached until the person sends it.
+    const result = await runDraftJob(
       {
-        to: draft.to,
-        subject: draft.subject,
-        body: draft.body,
-        thread_id: target.thread.external_id,
+        sql,
+        contentKey: master,
+        credentials: createUserVaultCredentialProvider({
+          sql,
+          masterKey: master,
+          transport: tokenTransport,
+          clientCredentials: clientFor,
+        }),
+        transport: gmailTransport,
+        composer,
+        now,
       },
+      ctx,
+      id,
+      "manual",
     );
-
-    // Mark it AFTER the draft exists. If Gmail refused, the obligation stays
-    // pending and the person sees it again, rather than a "drafted" that
-    // points at nothing.
-    await setObligationOutcome(sql, ctx, id, "drafted");
-    // Recorded so the next sync can match it to what was actually sent.
-    await recordDraft(sql, ctx, {
-      obligation_id: id,
-      thread_id: target.thread.id,
-      gmail_draft_id: created.draft_id,
-      subject: draft.subject,
-      body_ciphertext: encryptBody(draft.body, master, ctx),
-      body_chars: draft.body.length,
-      composer: draft.composer,
-      model_alias: draft.model_alias,
-      fallback_reason: draft.fallback_reason,
-    });
-    return {
-      obligation_id: id,
-      draft_id: created.draft_id,
-      to: draft.to,
-      subject: draft.subject,
-      composer: draft.composer,
-      ...(draft.fallback_reason ? { fallback_reason: draft.fallback_reason } : {}),
-    };
+    if (!result.ok) {
+      // Missing, decided, and someone else's are one 404.
+      if (result.reason === "not_found") {
+        return reply.status(404).send({ status: 404, title: "Not Found" });
+      }
+      return reply.status(409).send({ status: 409, reason: result.reason });
+    }
+    return result;
   });
 }

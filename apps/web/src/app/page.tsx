@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { explain, me, nextMeetingLine } from "@/lib/me";
+import { draftsLine, explain, gmailDraftUrl, me, nextMeetingLine } from "@/lib/me";
 import {
   dismissAction,
   draftAction,
@@ -56,6 +56,8 @@ export default async function InboxPage() {
   const skipped = obligations.data.skipped;
   const agentMode = obligations.data.agent_mode;
   const known = intents.ok ? intents.data.intents : [];
+  const week = draftsLine(obligations.data.drafts_this_week);
+  const ready = items.filter((o) => o.draft !== null).length;
   return (
     <>
       <div className="row">
@@ -64,8 +66,10 @@ export default async function InboxPage() {
           <p className="muted">
             {items.length === 0
               ? "Nothing pending. You're caught up."
-              : `${items.length} ${items.length === 1 ? "thread" : "threads"}, most urgent first.`}
+              : `${items.length} ${items.length === 1 ? "thread" : "threads"}, most urgent first.` +
+                (ready > 0 ? ` ${ready} ${ready === 1 ? "draft" : "drafts"} ready in Gmail.` : "")}
           </p>
+          {week ? <p className="fine">{week}</p> : null}
         </div>
         <form action={syncAction}>
           <button className="button secondary" type="submit">
@@ -83,6 +87,11 @@ export default async function InboxPage() {
                 <span className={`pill ${o.kind}`}>{KIND_LABEL[o.kind]}</span>
                 {why.source === "agent" && o.assessment?.urgency === "high" ? (
                   <span className="pill urgent">Urgent</span>
+                ) : null}
+                {o.draft ? (
+                  <span className="pill ready">
+                    {o.draft.mode === "auto" ? "Draft ready" : "Drafted"}
+                  </span>
                 ) : null}
                 <h3>{why.headline}</h3>
                 <p className="muted">{why.detail}</p>
@@ -104,11 +113,22 @@ export default async function InboxPage() {
                 </p>
               </div>
               <div className="item-actions">
-                <form action={draftAction.bind(null, o.id)}>
-                  <button className="button" type="submit">
-                    Draft follow-up
-                  </button>
-                </form>
+                {o.draft ? (
+                  <a
+                    className="button"
+                    href={gmailDraftUrl(o.draft)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open draft in Gmail
+                  </a>
+                ) : (
+                  <form action={draftAction.bind(null, o.id)}>
+                    <button className="button" type="submit">
+                      Draft follow-up
+                    </button>
+                  </form>
+                )}
                 <form action={snoozeAction.bind(null, o.id)}>
                   <button className="button secondary" type="submit">
                     Snooze 3 days

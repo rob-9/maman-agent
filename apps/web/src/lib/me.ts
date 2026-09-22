@@ -88,10 +88,12 @@ export type OrgConnectorView = {
 
 export const me = {
   obligations: () =>
-    call<{ obligations: ObligationView[]; skipped: SkippedView[]; agent_mode: "off" | "assist" }>(
-      "GET",
-      "/v1/me/obligations",
-    ),
+    call<{
+      obligations: ObligationView[];
+      skipped: SkippedView[];
+      drafts_this_week: { drafted: number; sent: number; sent_as_written: number };
+      agent_mode: "off" | "assist";
+    }>("GET", "/v1/me/obligations"),
   intents: () => call<{ intents: IntentView[] }>("GET", "/v1/me/intents"),
   stateIntent: (text: string) => call<{ intent: IntentView }>("POST", "/v1/me/intents", { text }),
   retireIntent: (id: string) => call<{ id: string }>("POST", `/v1/me/intents/${id}/retire`),
@@ -126,4 +128,4 @@ export const me = {
     ),
 };
 
-export { explain, nextMeetingLine } from "./explain.js";
+export { draftsLine, explain, gmailDraftUrl, nextMeetingLine } from "./explain.js";

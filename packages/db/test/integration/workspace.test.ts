@@ -784,6 +784,13 @@ describe("voice retrieval and the record of drafts", () => {
       sent_as_written: 1,
       mean_edit_ratio: 0.925,
     });
+    // Since a moment in the future: nothing. The week's numbers are a window.
+    expect(await draftOutcomes(sql(), ctx, { since: new Date(Date.now() + 60_000) })).toEqual({
+      drafted: 0,
+      sent: 0,
+      sent_as_written: 0,
+      mean_edit_ratio: null,
+    });
     const raw = await withUser(
       sql(),
       ctx,
@@ -987,5 +994,79 @@ describe("the intent store and what it sets aside", () => {
     });
     expect(await listIntents(sql(), theirs)).toEqual([]);
     expect(await retireIntent(sql(), theirs, id)).toBe(false);
+  });
+});
+
+describe("a draft attached to its obligation", () => {
+  const sql = () => db.client.sql;
+  it("rides on the list until it is matched to what was sent; the newest unsent one wins", async () => {
+    await upsertSyncedThreads(sql(), ctx, {
+      connection_id: connId,
+      threads: [
+        T({ external_id: "att-1", subject: "Attached", contact: { address: "att@x.com" } }),
+      ],
+    });
+    const inputs = await loadDetectionInputs(sql(), ctx);
+    const t = inputs.threads.find((x) => x.subject === "Attached")!;
+    await replacePendingObligations(
+      sql(),
+      ctx,
+      [
+        {
+          thread_id: t.thread_id,
+          contact_id: t.contact_id,
+          kind: "awaiting_them",
+          rank: 40,
+          reason: { days_elapsed: 6 },
+        },
+      ],
+      new Date(),
+    );
+    const before = (await listPendingObligations(sql(), ctx)).find(
+      (o) => o.thread_id === t.thread_id,
+    )!;
+    expect(before.draft).toBeNull();
+    const oblig = before.id;
+    await recordDraft(sql(), ctx, {
+      obligation_id: oblig,
+      thread_id: t.thread_id,
+      gmail_draft_id: "d-old",
+      gmail_message_id: "m-old",
+      mode: "manual",
+      subject: "Re: Attached",
+      body_ciphertext: Buffer.from("x"),
+      body_chars: 1,
+      composer: "deterministic",
+    });
+    const { id: newer } = await recordDraft(sql(), ctx, {
+      obligation_id: oblig,
+      thread_id: t.thread_id,
+      gmail_draft_id: "d-new",
+      gmail_message_id: "m-new",
+      mode: "auto",
+      subject: "Re: Attached",
+      body_ciphertext: Buffer.from("y"),
+      body_chars: 1,
+      composer: "model",
+    });
+    const withDraft = (await listPendingObligations(sql(), ctx)).find(
+      (o) => o.thread_id === t.thread_id,
+    )!;
+    expect(withDraft.draft).toMatchObject({
+      id: newer,
+      gmail_draft_id: "d-new",
+      gmail_message_id: "m-new",
+      mode: "auto",
+      composer: "model",
+    });
+    await matchDraftToSent(sql(), ctx, newer, {
+      external_id: "sent-1",
+      sent_at: new Date().toISOString(),
+      edit_ratio: 1,
+    });
+    const after = (await listPendingObligations(sql(), ctx)).find(
+      (o) => o.thread_id === t.thread_id,
+    )!;
+    expect(after.draft).toMatchObject({ gmail_draft_id: "d-old" });
   });
 });

@@ -20,6 +20,15 @@ export type ObligationView = {
   last_meeting_title: string | null;
   next_meeting_at: string | null;
   next_meeting_title: string | null;
+  /** The draft waiting in Gmail for this thread, if one is. */
+  draft: {
+    id: string;
+    gmail_draft_id: string;
+    gmail_message_id: string | null;
+    composer: "deterministic" | "model";
+    mode: "manual" | "auto";
+    created_at: string;
+  } | null;
   /** The agent's judgment, when it has read this thread in its current state. */
   assessment: {
     owed: boolean;
@@ -87,4 +96,23 @@ export function nextMeetingLine(o: ObligationView, now: Date = new Date()): stri
   if (!o.next_meeting_at || Date.parse(o.next_meeting_at) < now.getTime()) return null;
   const day = new Date(o.next_meeting_at).toLocaleDateString("en-US", { weekday: "long" });
   return o.next_meeting_title ? `Meeting ${day}: ${o.next_meeting_title}` : `Meeting ${day}`;
+}
+
+/** Where Gmail opens the draft. Falls back to the Drafts folder when the id is unknown. */
+export function gmailDraftUrl(draft: NonNullable<ObligationView["draft"]>): string {
+  return draft.gmail_message_id
+    ? `https://mail.google.com/mail/#drafts/${encodeURIComponent(draft.gmail_message_id)}`
+    : "https://mail.google.com/mail/#drafts";
+}
+
+/** "This week: 9 drafts, 6 sent as written." Empty when there is nothing to say yet. */
+export function draftsLine(d: {
+  drafted: number;
+  sent: number;
+  sent_as_written: number;
+}): string | null {
+  if (d.drafted === 0) return null;
+  const drafts = d.drafted === 1 ? "1 draft" : `${d.drafted} drafts`;
+  if (d.sent === 0) return `This week: ${drafts}, none sent yet.`;
+  return `This week: ${drafts}, ${d.sent} sent, ${d.sent_as_written} as written.`;
 }

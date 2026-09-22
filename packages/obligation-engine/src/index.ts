@@ -21,6 +21,7 @@ export {
   intentRuleSchema,
   intentScopeSchema,
   parseIntentRule,
+  predraftAllowed,
   resolveScope,
   type AppliedRules,
   type ContactRef,

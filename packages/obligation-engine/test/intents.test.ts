@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyIntentRules,
   parseIntentRule,
+  predraftAllowed,
   resolveScope,
   type ContactRef,
 } from "../src/intents.js";
@@ -153,5 +154,48 @@ describe("applying rules to what was detected", () => {
   it("with no rules, nothing changes", () => {
     const r = applyIntentRules([ob("t1", "c-dan", "awaiting_them")], [], byId, threads);
     expect(r).toEqual({ kept: [ob("t1", "c-dan", "awaiting_them")], skipped: [] });
+  });
+});
+
+describe("'don't draft for me'", () => {
+  it("is a rule about drafting, scoped like the others, and never sets a detection aside", () => {
+    for (const t of [
+      "Don't write drafts for me",
+      "No drafts unless I ask",
+      "Never draft for Acme",
+      "stop drafting",
+    ]) {
+      expect(parseIntentRule(t, contacts)?.kind).toBe("no_predraft");
+    }
+    expect(parseIntentRule("Never draft for Acme", contacts)).toEqual({
+      kind: "no_predraft",
+      scope: { kind: "account", value: "Acme" },
+    });
+    const rules = [
+      {
+        id: "i",
+        rule: { kind: "no_predraft" as const, scope: { kind: "account" as const, value: "Acme" } },
+      },
+    ];
+    expect(predraftAllowed(rules, contacts[0], "awaiting_them")).toBe(false);
+    expect(predraftAllowed(rules, contacts[1], "awaiting_them")).toBe(true);
+    expect(predraftAllowed([], contacts[0], "awaiting_them")).toBe(true);
+    const ob = {
+      thread_id: "t",
+      contact_id: "c-sarah",
+      kind: "awaiting_them" as const,
+      rank: 1,
+      reason: {
+        kind: "awaiting_them" as const,
+        days_elapsed: 6,
+        threshold_days: 5,
+        last_direction: "outbound" as const,
+        message_count: 1,
+        has_open_deal: null,
+      },
+    };
+    expect(
+      applyIntentRules([ob], rules, new Map([["c-sarah", contacts[0]!]]), new Map()).skipped,
+    ).toEqual([]);
   });
 });

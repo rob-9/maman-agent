@@ -439,6 +439,8 @@ export async function recordDraft(
     obligation_id: string;
     thread_id: string;
     gmail_draft_id: string;
+    gmail_message_id?: string | undefined;
+    mode?: "manual" | "auto" | undefined;
     subject: string;
     body_ciphertext: Uint8Array;
     body_chars: number;
@@ -457,6 +459,8 @@ export async function recordDraft(
         obligation_id: input.obligation_id,
         thread_id: input.thread_id,
         gmail_draft_id: input.gmail_draft_id,
+        gmail_message_id: input.gmail_message_id ?? null,
+        mode: input.mode ?? "manual",
         subject: input.subject,
         body_ciphertext: input.body_ciphertext,
         body_chars: input.body_chars,
@@ -514,6 +518,7 @@ export async function matchDraftToSent(
 export async function draftOutcomes(
   sql: Sql,
   ctx: UserContext,
+  opts: { since?: Date } = {},
 ): Promise<{
   drafted: number;
   sent: number;
@@ -521,6 +526,7 @@ export async function draftOutcomes(
   mean_edit_ratio: number | null;
 }> {
   return withUser(sql, ctx, async (tx) => {
+    const since = (opts.since ?? new Date(0)).toISOString();
     const [row] = await tx<
       Array<{
         drafted: number;
@@ -534,6 +540,7 @@ export async function draftOutcomes(
              count(*) FILTER (WHERE edit_ratio >= 0.9)::int AS sent_as_written,
              avg(edit_ratio) AS mean_edit_ratio
       FROM drafts
+      WHERE created_at >= ${since}::timestamptz
     `;
     return {
       drafted: row!.drafted,
@@ -1047,6 +1054,17 @@ export type PendingObligationRow = {
   next_meeting_title: string | null;
   /** Present when the agent has judged this thread in its current state. */
   assessment: ThreadAssessment | null;
+  /** The draft waiting in Gmail for this thread, if one is. */
+  draft: PendingDraft | null;
+};
+
+export type PendingDraft = {
+  id: string;
+  gmail_draft_id: string;
+  gmail_message_id: string | null;
+  composer: "deterministic" | "model";
+  mode: "manual" | "auto";
+  created_at: string;
 };
 
 const URGENCY_WEIGHT: Record<ThreadAssessment["urgency"], number> = { high: 2, normal: 1, low: 0 };
@@ -1103,6 +1121,10 @@ export async function listPendingObligations(
       .where(and(eq(schema.obligations.outcome, "pending")))
       .orderBy(desc(schema.obligations.rank), schema.obligations.thread_id);
 
+    const drafts = await unmatchedDraftsByThread(
+      tx,
+      rows.map((r) => r.thread_id),
+    );
     const mapped = rows.map((r) => {
       // A judgment describes one thread state; a newer message makes it stale
       // and it is not shown (nor trusted) until the agent looks again.
@@ -1132,6 +1154,7 @@ export async function listPendingObligations(
         next_meeting_at: r.next_meeting_at ? new Date(r.next_meeting_at).toISOString() : null,
         next_meeting_title: r.next_meeting_title,
         assessment: fresh ? (r.assessment as ThreadAssessment) : null,
+        draft: drafts.get(r.thread_id) ?? null,
       };
     });
 
@@ -1149,6 +1172,40 @@ export async function listPendingObligations(
       })
       .slice(0, limit);
   });
+}
+
+/** The newest unsent draft per thread, for the threads given. */
+async function unmatchedDraftsByThread(
+  tx: TransactionSql,
+  threadIds: readonly string[],
+): Promise<Map<string, PendingDraft>> {
+  const out = new Map<string, PendingDraft>();
+  if (threadIds.length === 0) return out;
+  const rows = await db(tx)
+    .select({
+      id: schema.drafts.id,
+      thread_id: schema.drafts.thread_id,
+      gmail_draft_id: schema.drafts.gmail_draft_id,
+      gmail_message_id: schema.drafts.gmail_message_id,
+      composer: schema.drafts.composer,
+      mode: schema.drafts.mode,
+      created_at: schema.drafts.created_at,
+    })
+    .from(schema.drafts)
+    .where(and(isNull(schema.drafts.matched_at), inArray(schema.drafts.thread_id, [...threadIds])))
+    .orderBy(desc(schema.drafts.created_at));
+  for (const r of rows) {
+    if (out.has(r.thread_id)) continue;
+    out.set(r.thread_id, {
+      id: r.id,
+      gmail_draft_id: r.gmail_draft_id,
+      gmail_message_id: r.gmail_message_id,
+      composer: r.composer,
+      mode: r.mode,
+      created_at: new Date(r.created_at).toISOString(),
+    });
+  }
+  return out;
 }
 
 /** The detector's bands, so urgency reorders within a band and never across one. */

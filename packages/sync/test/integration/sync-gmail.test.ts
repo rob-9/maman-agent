@@ -29,6 +29,8 @@ import { decryptBody, encryptBody, storedThreadContent } from "../../src/content
 import { voiceFor } from "../../src/voice.js";
 import { meetingContext } from "../../src/meetings.js";
 import { intentsFor, listIntentViews, skippedWithReasons, stateIntent } from "../../src/intents.js";
+import { DeterministicModelProvider } from "@maman/model-provider";
+import { deterministicContextComposer } from "@maman/voice-engine";
 import { recordDraft, draftOutcomes } from "@maman/db";
 
 /**
@@ -879,5 +881,164 @@ describe("the intent store in the sweep", () => {
     await runGmailSyncJob({ ...deps(), agent: { provider } }, ctx);
     const pricing = seen.find((i) => i.subject === "Enterprise pricing")!;
     expect(pricing.preferences).toEqual(["Keep emails to Sarah short.", "Sign off as Cheers, A."]);
+  });
+});
+
+describe("drafts written before being asked", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  const ideps = () => ({ sql: client.sql, contentKey: master });
+  const judge: ModelProvider = {
+    id: "demo",
+    nameRecommendation: async () => ({ ok: false, error: "unavailable" }),
+    draftAgentPlan: async () => ({ ok: false, error: "unavailable" }),
+    composeDraft: async () => ({ ok: false, error: "unavailable" }),
+    async assessObligation(input) {
+      // Sarah's question is owed; nothing else is.
+      const owed = input.subject === "Enterprise pricing";
+      return {
+        ok: true,
+        value: {
+          owed,
+          ask: owed ? "pricing for 60 seats" : "",
+          summary: "s",
+          urgency: "normal",
+          confidence: 0.6,
+        },
+        usage: { input_tokens: 0, output_tokens: 0, model_alias: "fake" },
+      };
+    },
+  };
+  const composer = deterministicContextComposer(new DeterministicModelProvider());
+  const posts: HttpRequest[] = [];
+  const draftingTransport = async (req: HttpRequest): Promise<HttpResponse> => {
+    if (req.method === "POST" && req.url.endsWith("/drafts")) {
+      posts.push(req);
+      return {
+        status: 200,
+        headers: {},
+        body: { id: `d-${posts.length}`, message: { id: `m-${posts.length}` } },
+      };
+    }
+    return transport(req);
+  };
+  const withPredraft = (max = 3) => ({
+    ...deps(),
+    transport: draftingTransport,
+    agent: { provider: judge },
+    predraft: { composer, max },
+  });
+
+  it("drafts only what the agent judged owed, once per thread, and attaches it to the item", async () => {
+    for (const v of await listIntentViews(ideps(), ctx)) {
+      const { forgetIntent } = await import("../../src/intents.js");
+      await forgetIntent(ideps(), ctx, v.id);
+    }
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM drafts`);
+    CALENDAR = { items: [], nextSyncToken: "cal-tok-pd" };
+    const first = await runGmailSyncJob(withPredraft(), ctx);
+    expect(first.ok && first.predraft).toEqual({
+      considered: 1,
+      drafted: 1,
+      skipped_by_rule: 0,
+      failed: 0,
+    });
+    expect(posts).toHaveLength(1);
+    const list = await listPendingObligations(client.sql, ctx, 50, { agent: true });
+    const pricing = list.find((o) => o.subject === "Enterprise pricing")!;
+    expect(pricing.draft).toMatchObject({
+      mode: "auto",
+      gmail_draft_id: "d-1",
+      gmail_message_id: "m-1",
+    });
+    // The draft answers the actual ask, in the sender's name, filed on the thread.
+    const raw = JSON.parse(posts[0]!.body!) as { message: { raw: string; threadId: string } };
+    expect(raw.message.threadId).toBe("owed");
+    expect(Buffer.from(raw.message.raw, "base64url").toString("utf8")).toContain(
+      "pricing for 60 seats",
+    );
+    // The next sweep writes nothing new: the draft is still waiting.
+    const second = await runGmailSyncJob(withPredraft(), ctx);
+    expect(second.ok && second.predraft).toEqual({
+      considered: 0,
+      drafted: 0,
+      skipped_by_rule: 0,
+      failed: 0,
+    });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("'don't draft for me' holds the sweep back; a click still works; a cap of 0 disables it", async () => {
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM drafts`);
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    const said = await stateIntent(ideps(), ctx, "Don't write drafts for me unless I ask.");
+    expect(said.is_rule).toBe(true);
+    const r = await runGmailSyncJob(withPredraft(), ctx);
+    expect(r.ok && r.predraft).toEqual({
+      considered: 1,
+      drafted: 0,
+      skipped_by_rule: 1,
+      failed: 0,
+    });
+    expect(posts).toHaveLength(1);
+    const { forgetIntent } = await import("../../src/intents.js");
+    await forgetIntent(ideps(), ctx, said.id);
+    const off = await runGmailSyncJob(withPredraft(0), ctx);
+    expect(off.ok && off.predraft).toEqual({
+      considered: 0,
+      drafted: 0,
+      skipped_by_rule: 0,
+      failed: 0,
+    });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("an item the agent could not judge is left alone: the arithmetic keeps it on the list, nobody drafts it", async () => {
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM drafts`);
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    const partial: ModelProvider = {
+      ...judge,
+      async assessObligation(input) {
+        if (input.subject === "Renewal") return { ok: false, error: "unavailable" };
+        return judge.assessObligation(input);
+      },
+    };
+    posts.length = 0;
+    const r = await runGmailSyncJob({ ...withPredraft(), agent: { provider: partial } }, ctx);
+    expect(r.ok && r.agent?.failed).toBe(1);
+    // Renewal is still on the list, unjudged; the sweep drafted only what was judged owed.
+    const list = await listPendingObligations(client.sql, ctx, 50, { agent: true });
+    expect(list.map((o) => o.subject)).toContain("Renewal");
+    expect(r.ok && r.predraft).toEqual({
+      considered: 1,
+      drafted: 1,
+      skipped_by_rule: 0,
+      failed: 0,
+    });
+    const threads = posts.map(
+      (p) => (JSON.parse(p.body!) as { message: { threadId: string } }).message.threadId,
+    );
+    expect(threads).toEqual(["owed"]);
+  });
+
+  it("a Gmail refusal is counted, not raised, and the item stays as it was", async () => {
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM drafts`);
+    await withUser(client.sql, ctx, (tx) => tx`DELETE FROM thread_assessments`);
+    const refusing = async (req: HttpRequest): Promise<HttpResponse> =>
+      req.method === "POST"
+        ? { status: 500, headers: {}, body: { error: { message: "quota" } } }
+        : transport(req);
+    const r = await runGmailSyncJob({ ...withPredraft(), transport: refusing }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.predraft).toEqual({
+      considered: 1,
+      drafted: 0,
+      skipped_by_rule: 0,
+      failed: 1,
+    });
+    const pricing = (await listPendingObligations(client.sql, ctx, 50)).find(
+      (o) => o.subject === "Enterprise pricing",
+    )!;
+    expect(pricing.draft).toBeNull();
   });
 });

@@ -14,7 +14,8 @@ import {
   MemoryIdempotencyStore,
   realAdapterRegistry,
 } from "@maman/connector-adapters";
-import { createModelProvider } from "@maman/model-provider";
+import { createModelProvider, DeterministicModelProvider } from "@maman/model-provider";
+import { deterministicContextComposer, modelComposer } from "@maman/voice-engine";
 import { createDbClient } from "@maman/db";
 import { createConnectorTokenTransport } from "@maman/connector-auth";
 import { createActivities, type PersistenceSink } from "./activities.js";
@@ -150,6 +151,14 @@ function buildSweepActivities() {
           agent: {
             provider: createModelProvider(env),
             content: gmailContentReader({ credentials, transport: fetchTransport }),
+          },
+          // Drafts written before being asked, from the same job a click uses.
+          predraft: {
+            composer: modelComposer({
+              provider: createModelProvider(env),
+              fallback: deterministicContextComposer(new DeterministicModelProvider()),
+            }),
+            max: env.PREDRAFT_PER_SWEEP ?? 3,
           },
         }
       : {}),

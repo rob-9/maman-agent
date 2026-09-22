@@ -424,3 +424,12 @@ form.dismiss input {
   border-color: var(--primary);
   color: var(--primary);
 }
+
+.pill.ready {
+  border-color: var(--success);
+  color: var(--success);
+  margin-left: 6px;
+}
+a.button {
+  text-decoration: none;
+}

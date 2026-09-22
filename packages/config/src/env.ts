@@ -63,6 +63,8 @@ export const serverEnvSchema = z
      * variable and nothing else.
      */
     AGENT_MODE: z.enum(["off", "assist"]).optional(),
+    /** Drafts the sweep writes per person per sweep, when the agent is on. Default 3, 0 disables. */
+    PREDRAFT_PER_SWEEP: z.coerce.number().int().min(0).max(20).optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production") {

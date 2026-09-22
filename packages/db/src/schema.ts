@@ -505,6 +505,10 @@ export const drafts = pgTable("drafts", {
   obligation_id: uuid("obligation_id"),
   thread_id: uuid("thread_id").notNull(),
   gmail_draft_id: text("gmail_draft_id").notNull(),
+  gmail_message_id: text("gmail_message_id"),
+  mode: text("mode", { enum: ["manual", "auto"] })
+    .notNull()
+    .default("manual"),
   subject: text("subject").notNull(),
   body_ciphertext: bytea("body_ciphertext").notNull(),
   body_chars: integer("body_chars").notNull(),
