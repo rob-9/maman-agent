@@ -8,6 +8,7 @@ import {
   listPendingObligations,
   loadDetectionInputs,
   replacePendingObligations,
+  setObligationOutcome,
   upsertSyncedThreads,
   upsertThreadAssessment,
   getThreadMessages,
@@ -34,6 +35,14 @@ import {
   listWorkflowEvents,
   latestWorkflowEventWrite,
   countWorkflowEvents,
+  upsertRoutineCandidates,
+  listRoutineCandidates,
+  dismissRoutine,
+  recentlyDismissedRoutines,
+  setRoutineAgent,
+  createRoutineRun,
+  completeRoutineRun,
+  listRoutineRuns,
   type SyncedThread,
 } from "../../src/workspace.js";
 import { startTestDb, type TestDb } from "./setup.js";
@@ -192,6 +201,87 @@ describe("workspace repository", () => {
     expect(pending[0]!.contact_display_name).toBe("Bob Jones");
   });
 
+  it("a decision holds while the thread stands still, and lifts once it moves", async () => {
+    await upsertSyncedThreads(db.client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-moves",
+          subject: "Moves",
+          last_message_at: "2026-09-10T09:00:00.000Z",
+        }),
+      ],
+    });
+    const inputs = await loadDetectionInputs(db.client.sql, ctx);
+    const thread = inputs.threads.find((t) => t.subject === "Moves")!;
+    const detected = {
+      thread_id: thread.thread_id,
+      contact_id: thread.contact_id,
+      kind: "awaiting_them" as const,
+      rank: 40,
+      reason: {
+        kind: "awaiting_them",
+        days_elapsed: 6,
+        threshold_days: 5,
+        last_direction: "outbound",
+        message_count: 2,
+        has_open_deal: null,
+      },
+    };
+    await replacePendingObligations(
+      db.client.sql,
+      ctx,
+      [detected],
+      new Date("2026-09-16T09:00:00.000Z"),
+    );
+    const pending = (await listPendingObligations(db.client.sql, ctx)).find(
+      (o) => o.thread_id === thread.thread_id,
+    )!;
+    expect(await setObligationOutcome(db.client.sql, ctx, pending.id, "dismissed")).toBe(true);
+    // The fixture's clock: the decision was made on the 16th.
+    await withUser(db.client.sql, ctx, async (tx) => {
+      await tx`UPDATE obligations SET updated_at = '2026-09-16T10:00:00Z' WHERE id = ${pending.id}`;
+    });
+    // Same thread, next sweep: still dismissed, not raised again.
+    const kept = await replacePendingObligations(
+      db.client.sql,
+      ctx,
+      [detected],
+      new Date("2026-09-17T09:00:00.000Z"),
+    );
+    expect(kept.kept_decided).toBe(1);
+    expect(
+      (await listPendingObligations(db.client.sql, ctx)).some(
+        (o) => o.thread_id === thread.thread_id,
+      ),
+    ).toBe(false);
+    // The thread moves: they wrote again. The decision was about the old thread.
+    await upsertSyncedThreads(db.client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-moves",
+          subject: "Moves",
+          last_message_at: "2026-09-18T09:00:00.000Z",
+          last_direction: "inbound",
+          message_count: 3,
+        }),
+      ],
+    });
+    const raised = await replacePendingObligations(
+      db.client.sql,
+      ctx,
+      [{ ...detected, kind: "awaiting_you" as const }],
+      new Date("2026-09-19T09:00:00.000Z"),
+    );
+    expect(raised.written).toBe(1);
+    expect(
+      (await listPendingObligations(db.client.sql, ctx)).find(
+        (o) => o.thread_id === thread.thread_id,
+      )?.kind,
+    ).toBe("awaiting_you");
+  });
+
   it("lists most urgent first with the thread and contact joined in", async () => {
     const { threads } = await loadDetectionInputs(db.client.sql, ctx);
     // Reset to two pending with distinct ranks.
@@ -207,7 +297,7 @@ describe("workspace repository", () => {
     }));
     await replacePendingObligations(db.client.sql, ctx, rows, new Date());
     const pending = await listPendingObligations(db.client.sql, ctx);
-    expect(pending.map((p) => p.rank)).toEqual([20, 10]);
+    expect(pending.map((p) => p.rank)).toEqual(rows.map((r) => r.rank).sort((a, b) => b - a));
     expect(pending[0]!.subject).toBeTruthy();
   });
 
@@ -1213,5 +1303,167 @@ describe("the event stream", () => {
     ]);
     expect(r).toEqual({ written: 0, refused: "event names another person" });
     expect((await listWorkflowEvents(db.client.sql, ctx)).length).toBeGreaterThan(0);
+  });
+});
+
+describe("routines discovery found", () => {
+  const NOW = new Date("2026-09-22T12:00:00.000Z");
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: "0192b3c4-0000-7000-8000-0000000000d1",
+    signature: "a|b|c",
+    status: "candidate" as const,
+    title: "Reply and update Salesforce",
+    summary: "You reply and update the deal.",
+    occurrence_count: 2,
+    distinct_day_count: 2,
+    first_seen_at: "2026-09-01T10:00:00.000Z",
+    last_seen_at: "2026-09-05T10:00:00.000Z",
+    candidate: { canonical_sequence: ["a", "b", "c"] },
+    naming: { required_capabilities: ["gmail.create_draft"] },
+    verdict: { failed: [{ bar: "occurrences" }] },
+    evidence: [
+      {
+        started_at: "2026-09-01T10:00:00.000Z",
+        ended_at: "2026-09-01T12:00:00.000Z",
+        case_ref: "ab".repeat(16),
+        events: 3,
+      },
+    ],
+    ...over,
+  });
+
+  it("a routine seen again is the same row with fresh counts and evidence; 'not now' and the agent link survive the rewrite", async () => {
+    await upsertRoutineCandidates(db.client.sql, ctx, [row()], NOW);
+    let rows = await listRoutineCandidates(db.client.sql, ctx);
+    expect(rows.map((r) => r.signature)).toEqual(["a|b|c"]);
+    expect(rows[0]!.decision).toBeNull();
+    expect(rows[0]!.evidence.length).toBe(1);
+    expect((await dismissRoutine(db.client.sql, ctx, rows[0]!.id, NOW))?.decision).toBe(
+      "dismissed",
+    );
+    expect(
+      await setRoutineAgent(
+        db.client.sql,
+        ctx,
+        rows[0]!.id,
+        "0192b3c4-0000-7000-8000-0000000000a9",
+      ),
+    ).toBe(true);
+    await upsertRoutineCandidates(
+      db.client.sql,
+      ctx,
+      [
+        row({
+          status: "eligible",
+          occurrence_count: 4,
+          distinct_day_count: 3,
+          verdict: { failed: [] },
+          evidence: [],
+        }),
+      ],
+      new Date(NOW.getTime() + 1000),
+    );
+    rows = await listRoutineCandidates(db.client.sql, ctx);
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({
+      status: "eligible",
+      occurrence_count: 4,
+      decision: "dismissed",
+      agent_id: "0192b3c4-0000-7000-8000-0000000000a9",
+    });
+    expect(rows[0]!.decided_at).toBe(NOW.toISOString());
+    expect(rows[0]!.evidence).toEqual([]);
+  });
+
+  it("'not now' counts inside the cooldown and lapses after it", async () => {
+    expect(await recentlyDismissedRoutines(db.client.sql, ctx, NOW, 14)).toEqual(["a|b|c"]);
+    const later = new Date(NOW.getTime() + 15 * 86_400_000);
+    expect(await recentlyDismissedRoutines(db.client.sql, ctx, later, 14)).toEqual([]);
+  });
+
+  it("a colleague reads none of it and cannot decide on it", async () => {
+    const other = uuidv7();
+    await globalCreateUser(db.client.sql, {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "rt-other@co.example",
+      display_name: "Other",
+    });
+    await addMembership(
+      db.client.sql,
+      { organizationId: orgId },
+      { user_id: other, role: "member" },
+    );
+    const theirs = { organizationId: orgId, userId: other };
+    expect(await listRoutineCandidates(db.client.sql, theirs)).toEqual([]);
+    const mine = (await listRoutineCandidates(db.client.sql, ctx))[0]!;
+    expect(await dismissRoutine(db.client.sql, theirs, mine.id, NOW)).toBeNull();
+    expect(await setRoutineAgent(db.client.sql, theirs, mine.id, null)).toBe(false);
+    expect((await listRoutineCandidates(db.client.sql, ctx))[0]!.agent_id).not.toBeNull();
+  });
+});
+
+describe("runs of an accepted routine", () => {
+  const NOW = new Date("2026-09-22T12:00:00.000Z");
+  const input = (over: Record<string, unknown> = {}) => ({
+    id: uuidv7(),
+    routine_id: "0192b3c4-0000-7000-8000-0000000000d1",
+    agent_id: "0192b3c4-0000-7000-8000-0000000000a9",
+    agent_version_id: "0192b3c4-0000-7000-8000-0000000000a8",
+    trigger_event_id: "0192b3c4-0000-7000-8000-0000000000e1",
+    triggered_at: NOW.toISOString(),
+    case_ref: "ab".repeat(16),
+    mode: "shadow" as const,
+    status: "watching" as const,
+    proposed: [
+      { object_ref: "ab".repeat(16), field: "gmail.create_draft", proposed_value_hash: "x" },
+    ],
+    ...over,
+  });
+
+  it("one run per trigger event: the second attempt returns nothing and nothing is written", async () => {
+    const first = await createRoutineRun(db.client.sql, ctx, input());
+    expect(first?.status).toBe("watching");
+    expect(await createRoutineRun(db.client.sql, ctx, input({ id: uuidv7() }))).toBeNull();
+    expect(
+      (await listRoutineRuns(db.client.sql, ctx, { routine_id: input().routine_id })).length,
+    ).toBe(1);
+  });
+
+  it("completes only from watching, once", async () => {
+    const run = (await listRoutineRuns(db.client.sql, ctx, { status: "watching" }))[0]!;
+    const done = await completeRoutineRun(db.client.sql, ctx, run.id, {
+      status: "completed",
+      comparison: { agreement: 1 },
+      completed_at: NOW.toISOString(),
+    });
+    expect(done?.status).toBe("completed");
+    expect(
+      await completeRoutineRun(db.client.sql, ctx, run.id, {
+        status: "failed",
+        completed_at: NOW.toISOString(),
+      }),
+    ).toBeNull();
+    expect(
+      (await listRoutineRuns(db.client.sql, ctx, { routine_id: run.routine_id }))[0]!.status,
+    ).toBe("completed");
+  });
+
+  it("a colleague reads none of it", async () => {
+    const other = uuidv7();
+    await globalCreateUser(db.client.sql, {
+      id: other,
+      workos_user_id: `wu_${other}`,
+      email: "rr-other@co.example",
+      display_name: "Other",
+    });
+    await addMembership(
+      db.client.sql,
+      { organizationId: orgId },
+      { user_id: other, role: "member" },
+    );
+    expect(await listRoutineRuns(db.client.sql, { organizationId: orgId, userId: other })).toEqual(
+      [],
+    );
   });
 });

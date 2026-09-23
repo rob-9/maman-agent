@@ -27,10 +27,11 @@
     "@maman/model-provider": "workspace:*",
     "@maman/voice-engine": "workspace:*",
     "@maman/policy-engine": "workspace:*",
-    "@maman/contracts": "workspace:*"
+    "@maman/contracts": "workspace:*",
+    "@maman/pattern-engine": "workspace:*",
+    "@maman/capability-catalog": "workspace:*"
   },
   "devDependencies": {
-    "@maman/pattern-engine": "workspace:*",
     "@maman/tsconfig": "workspace:*",
     "@testcontainers/postgresql": "^12.0.4",
     "@types/node": "^24",

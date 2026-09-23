@@ -116,3 +116,56 @@ export function draftsLine(d: {
   if (d.sent === 0) return `This week: ${drafts}, none sent yet.`;
   return `This week: ${drafts}, ${d.sent} sent, ${d.sent_as_written} as written.`;
 }
+
+/** "Seen 4 times on 4 days, around Bob Ray, Sarah Chen and one more." */
+export function routineEvidenceLine(r: {
+  occurrence_count: number;
+  distinct_day_count: number;
+  evidence: Array<{ contact_display_name: string | null }>;
+}): string {
+  const times = r.occurrence_count === 1 ? "once" : `${r.occurrence_count} times`;
+  const days = r.distinct_day_count === 1 ? "1 day" : `${r.distinct_day_count} days`;
+  const names = [
+    ...new Set(r.evidence.map((e) => e.contact_display_name).filter((n): n is string => !!n)),
+  ];
+  if (names.length === 0) return `Seen ${times} on ${days}.`;
+  const shown = names.slice(0, 3);
+  const rest = names.length - shown.length;
+  // "A, B and C" when that is everyone; "A, B, C and 2 more" when it is not.
+  const list =
+    rest > 0
+      ? `${shown.join(", ")} and ${rest} more`
+      : shown.length === 1
+        ? shown[0]!
+        : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+  return `Seen ${times} on ${days}, around ${list}.`;
+}
+
+/** What a forming routine still needs, in one line. */
+export function formingLine(r: { why_not: string[] }): string {
+  return r.why_not.length > 0 ? r.why_not.join("; ") : "still forming";
+}
+
+/** "Ran alongside you 3 times, agreed 3 times. Ready to start." */
+export function routineRunsLine(runs: {
+  mode: "shadow" | "supervised" | null;
+  shadow_completed: number;
+  shadow_successful: number;
+  required: number;
+  ready_to_start: boolean;
+  supervised_completed: number;
+}): string {
+  if (runs.mode === "supervised") {
+    const n = runs.supervised_completed;
+    return n === 0
+      ? "Running. Its drafts and proposals will show up here for your approval."
+      : `Running. Produced drafts or proposals ${n === 1 ? "once" : `${n} times`}, each for your approval.`;
+  }
+  const done = runs.shadow_completed;
+  const agreed = runs.shadow_successful;
+  if (done === 0) return "Accepted. It will run alongside you the next time this comes up.";
+  const base = `Ran alongside you ${done === 1 ? "once" : `${done} times`}, agreed ${agreed === 1 ? "once" : `${agreed} times`}.`;
+  return runs.ready_to_start
+    ? `${base} Ready to start.`
+    : `${base} Needs ${runs.required} that agree before it can start.`;
+}

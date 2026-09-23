@@ -98,3 +98,9 @@ export {
   type SalesforceOpportunityConfig,
   type SalesforceOpportunityWriter,
 } from "./salesforce-opportunity.js";
+export {
+  createDemoWorld,
+  DEMO_SALESFORCE_INSTANCE,
+  type DemoWorld,
+  type TokenTransportLike,
+} from "./demo-world.js";

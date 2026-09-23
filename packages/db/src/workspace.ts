@@ -872,6 +872,16 @@ export async function replacePendingObligations(
     await d
       .delete(schema.obligations)
       .where(inArray(schema.obligations.outcome, ["pending", "skipped"]));
+    // A decision holds for the thread as it was. Once the thread moves (they
+    // replied, the person wrote again), "not needed" or "later" was about
+    // something else, and the detector gets to look again.
+    await tx`
+      DELETE FROM obligations o
+      USING threads t
+      WHERE t.id = o.thread_id
+        AND o.outcome IN ('drafted', 'snoozed', 'dismissed', 'resolved')
+        AND t.last_message_at > o.updated_at
+    `;
 
     const insert = async (
       o: DetectedObligation,
@@ -1768,6 +1778,8 @@ export type EventFacts = {
     status: "confirmed" | "tentative" | "cancelled";
     self_response: "accepted" | "tentative" | "declined" | "needsAction";
     attendee_count: number;
+    /** Attendees who are this person's contacts, sorted. The case(s) the meeting belongs to. */
+    contact_addresses: string[];
   }>;
   actions: Array<{
     id: string;
@@ -1778,18 +1790,22 @@ export type EventFacts = {
     verified_at: string | null;
     reverted_at: string | null;
     field_names: string[];
+    contact_address: string | null;
   }>;
   decisions: Array<{
     obligation_id: string;
     kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
     outcome: "drafted" | "snoozed" | "dismissed" | "resolved";
     decided_at: string;
+    contact_address: string;
   }>;
   intents: Array<{
     id: string;
     source: "stated" | "observed" | "inferred";
     scope_kind: "global" | "contact" | "account" | "situation";
     created_at: string;
+    /** The contact the sentence is about, when its scope is one. */
+    contact_address: string | null;
   }>;
 };
 
@@ -1833,12 +1849,20 @@ export async function loadEventFacts(
         status: "confirmed" | "tentative" | "cancelled";
         self_response: "accepted" | "tentative" | "declined" | "needsAction";
         attendee_count: number;
+        contact_addresses: string[];
       }>
     >`
-      SELECT external_id, starts_at, ends_at, status, self_response,
-             jsonb_array_length(attendees)::int AS attendee_count
-      FROM meetings
-      WHERE ends_at >= ${from}
+      SELECT m.external_id, m.starts_at, m.ends_at, m.status, m.self_response,
+             jsonb_array_length(m.attendees)::int AS attendee_count,
+             ARRAY(
+               SELECT c.external_id FROM contacts c
+               WHERE c.external_id IN (
+                 SELECT lower(a->>'address') FROM jsonb_array_elements(m.attendees) a
+               )
+               ORDER BY c.external_id
+             ) AS contact_addresses
+      FROM meetings m
+      WHERE m.ends_at >= ${from}
         AND (${since}::timestamptz IS NULL OR updated_at >= ${since}::timestamptz)
       ORDER BY starts_at, external_id
     `;
@@ -1852,13 +1876,16 @@ export async function loadEventFacts(
         verified_at: Date | null;
         reverted_at: Date | null;
         diff: unknown;
+        contact_address: string | null;
       }>
     >`
-      SELECT id, kind, status, approved_by, approved_at, verified_at, reverted_at, diff
-      FROM actions
-      WHERE created_at >= ${from}
-        AND (${since}::timestamptz IS NULL OR updated_at >= ${since}::timestamptz)
-      ORDER BY created_at, id
+      SELECT a.id, a.kind, a.status, a.approved_by, a.approved_at, a.verified_at, a.reverted_at,
+             a.diff, c.external_id AS contact_address
+      FROM actions a
+      LEFT JOIN contacts c ON c.id = a.contact_id
+      WHERE a.created_at >= ${from}
+        AND (${since}::timestamptz IS NULL OR a.updated_at >= ${since}::timestamptz)
+      ORDER BY a.created_at, a.id
     `;
     const decisions = await tx<
       Array<{
@@ -1866,14 +1893,17 @@ export async function loadEventFacts(
         kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
         outcome: "drafted" | "snoozed" | "dismissed" | "resolved";
         decided_at: Date;
+        contact_address: string;
       }>
     >`
-      SELECT id AS obligation_id, kind, outcome, updated_at AS decided_at
-      FROM obligations
-      WHERE outcome IN ('drafted', 'snoozed', 'dismissed', 'resolved')
-        AND updated_at >= ${from}
-        AND (${since}::timestamptz IS NULL OR updated_at >= ${since}::timestamptz)
-      ORDER BY updated_at, id
+      SELECT o.id AS obligation_id, o.kind, o.outcome, o.updated_at AS decided_at,
+             c.external_id AS contact_address
+      FROM obligations o
+      JOIN contacts c ON c.id = o.contact_id
+      WHERE o.outcome IN ('drafted', 'snoozed', 'dismissed', 'resolved')
+        AND o.updated_at >= ${from}
+        AND (${since}::timestamptz IS NULL OR o.updated_at >= ${since}::timestamptz)
+      ORDER BY o.updated_at, o.id
     `;
     const intents = await tx<
       Array<{
@@ -1881,9 +1911,11 @@ export async function loadEventFacts(
         source: "stated" | "observed" | "inferred";
         scope_kind: "global" | "contact" | "account" | "situation";
         created_at: Date;
+        contact_address: string | null;
       }>
     >`
-      SELECT id, source, scope_kind, created_at
+      SELECT id, source, scope_kind, created_at,
+             CASE WHEN scope_kind = 'contact' THEN scope_value ELSE NULL END AS contact_address
       FROM intents
       WHERE created_at >= ${from}
         AND (${since}::timestamptz IS NULL OR created_at >= ${since}::timestamptz)
@@ -1909,6 +1941,7 @@ export async function loadEventFacts(
         status: m.status,
         self_response: m.self_response,
         attendee_count: Number(m.attendee_count),
+        contact_addresses: m.contact_addresses ?? [],
       })),
       actions: actions.map((a) => ({
         id: a.id,
@@ -1919,18 +1952,21 @@ export async function loadEventFacts(
         verified_at: a.verified_at ? iso(a.verified_at) : null,
         reverted_at: a.reverted_at ? iso(a.reverted_at) : null,
         field_names: fieldNamesOf(a.diff),
+        contact_address: a.contact_address,
       })),
       decisions: decisions.map((d) => ({
         obligation_id: d.obligation_id,
         kind: d.kind,
         outcome: d.outcome,
         decided_at: iso(d.decided_at),
+        contact_address: d.contact_address,
       })),
       intents: intents.map((i) => ({
         id: i.id,
         source: i.source,
         scope_kind: i.scope_kind,
         created_at: iso(i.created_at),
+        contact_address: i.contact_address,
       })),
     };
   });
@@ -2017,5 +2053,326 @@ export async function countWorkflowEvents(sql: Sql, ctx: UserContext): Promise<n
   return withUser(sql, ctx, async (tx) => {
     const rows = await tx<Array<{ n: number }>>`SELECT count(*)::int AS n FROM workflow_events`;
     return Number(rows[0]?.n ?? 0);
+  });
+}
+
+// ---- routines discovery found ----
+
+/** The one decision kept here. Accepted and never live in the intent store. */
+export type RoutineDecision = "dismissed";
+
+export type RoutineEvidence = {
+  started_at: string;
+  ended_at: string;
+  case_ref: string | null;
+  events: number;
+};
+
+export type RoutineCandidateRow = {
+  id: string;
+  signature: string;
+  status: "candidate" | "eligible";
+  decision: RoutineDecision | null;
+  decided_at: string | null;
+  title: string;
+  summary: string;
+  occurrence_count: number;
+  distinct_day_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  candidate: unknown;
+  naming: unknown;
+  verdict: unknown;
+  evidence: RoutineEvidence[];
+  agent_id: string | null;
+  evaluated_at: string;
+};
+
+export type RoutineCandidateInput = Omit<
+  RoutineCandidateRow,
+  "id" | "decision" | "decided_at" | "evaluated_at" | "agent_id"
+> & { id: string };
+
+function toRoutineRow(r: typeof schema.routine_candidates.$inferSelect): RoutineCandidateRow {
+  return {
+    id: r.id,
+    signature: r.signature,
+    status: r.status,
+    decision: r.decision,
+    decided_at: r.decided_at ? new Date(r.decided_at).toISOString() : null,
+    title: r.title,
+    summary: r.summary,
+    occurrence_count: r.occurrence_count,
+    distinct_day_count: r.distinct_day_count,
+    first_seen_at: new Date(r.first_seen_at).toISOString(),
+    last_seen_at: new Date(r.last_seen_at).toISOString(),
+    candidate: r.candidate,
+    naming: r.naming,
+    verdict: r.verdict,
+    evidence: Array.isArray(r.evidence) ? (r.evidence as RoutineEvidence[]) : [],
+    agent_id: r.agent_id,
+    evaluated_at: new Date(r.evaluated_at).toISOString(),
+  };
+}
+
+/**
+ * Writes what discovery found this sweep. Keyed by signature: a routine seen
+ * again is the same row with fresh counts, scores and verdict. The person's
+ * decision and when they made it are never touched here.
+ */
+export async function upsertRoutineCandidates(
+  sql: Sql,
+  ctx: UserContext,
+  rows: readonly RoutineCandidateInput[],
+  evaluatedAt: Date,
+): Promise<{ written: number }> {
+  if (rows.length === 0) return { written: 0 };
+  return withUser(sql, ctx, async (tx) => {
+    let written = 0;
+    for (const r of rows) {
+      const out = await tx`
+        INSERT INTO routine_candidates
+          (id, organization_id, owner_user_id, signature, status, title, summary,
+           occurrence_count, distinct_day_count, first_seen_at, last_seen_at,
+           candidate, naming, verdict, evidence, evaluated_at)
+        VALUES (${r.id}, ${ctx.organizationId}, ${ctx.userId}, ${r.signature}, ${r.status},
+                ${r.title}, ${r.summary}, ${r.occurrence_count}, ${r.distinct_day_count},
+                ${r.first_seen_at}, ${r.last_seen_at},
+                ${JSON.stringify(r.candidate)}::jsonb, ${JSON.stringify(r.naming)}::jsonb,
+                ${JSON.stringify(r.verdict)}::jsonb, ${JSON.stringify(r.evidence)}::jsonb,
+                ${evaluatedAt.toISOString()})
+        ON CONFLICT (owner_user_id, signature) DO UPDATE SET
+          status = EXCLUDED.status,
+          title = EXCLUDED.title,
+          summary = EXCLUDED.summary,
+          occurrence_count = EXCLUDED.occurrence_count,
+          distinct_day_count = EXCLUDED.distinct_day_count,
+          first_seen_at = EXCLUDED.first_seen_at,
+          last_seen_at = EXCLUDED.last_seen_at,
+          candidate = EXCLUDED.candidate,
+          naming = EXCLUDED.naming,
+          verdict = EXCLUDED.verdict,
+          evidence = EXCLUDED.evidence,
+          evaluated_at = EXCLUDED.evaluated_at,
+          updated_at = now()
+        RETURNING id
+      `;
+      written += out.length;
+    }
+    return { written };
+  });
+}
+
+export async function listRoutineCandidates(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { limit?: number | undefined } = {},
+): Promise<RoutineCandidateRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.routine_candidates)
+      .orderBy(desc(schema.routine_candidates.last_seen_at), schema.routine_candidates.signature)
+      .limit(opts.limit ?? 100);
+    return rows.map(toRoutineRow);
+  });
+}
+
+export async function getRoutineCandidate(
+  sql: Sql,
+  ctx: UserContext,
+  id: string,
+): Promise<RoutineCandidateRow | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.routine_candidates)
+      .where(eq(schema.routine_candidates.id, id))
+      .limit(1);
+    return rows[0] ? toRoutineRow(rows[0]) : null;
+  });
+}
+
+/** "Not now", kept here with when it was said so the cooldown can be counted. */
+export async function dismissRoutine(
+  sql: Sql,
+  ctx: UserContext,
+  id: string,
+  at: Date,
+): Promise<RoutineCandidateRow | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .update(schema.routine_candidates)
+      .set({ decision: "dismissed", decided_at: at.toISOString(), updated_at: rawSql`now()` })
+      .where(eq(schema.routine_candidates.id, id))
+      .returning();
+    return rows[0] ? toRoutineRow(rows[0]) : null;
+  });
+}
+
+/** Links a routine to the agent compiled from it. */
+export async function setRoutineAgent(
+  sql: Sql,
+  ctx: UserContext,
+  id: string,
+  agentId: string | null,
+): Promise<boolean> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .update(schema.routine_candidates)
+      .set({ agent_id: agentId, updated_at: rawSql`now()` })
+      .where(eq(schema.routine_candidates.id, id))
+      .returning({ id: schema.routine_candidates.id });
+    return rows.length === 1;
+  });
+}
+
+/** Signatures the person said "not now" to inside the cooldown. */
+export async function recentlyDismissedRoutines(
+  sql: Sql,
+  ctx: UserContext,
+  now: Date,
+  cooldownDays: number,
+): Promise<string[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const cutoff = new Date(now.getTime() - cooldownDays * 86_400_000).toISOString();
+    const rows = await tx<Array<{ signature: string }>>`
+      SELECT signature FROM routine_candidates
+      WHERE decision = 'dismissed' AND decided_at >= ${cutoff}::timestamptz
+      ORDER BY signature
+    `;
+    return rows.map((r) => r.signature);
+  });
+}
+
+// ---- runs of an accepted routine ----
+
+export type RoutineRunRow = {
+  id: string;
+  routine_id: string;
+  agent_id: string;
+  agent_version_id: string;
+  trigger_event_id: string;
+  triggered_at: string;
+  case_ref: string | null;
+  mode: "shadow" | "supervised";
+  status: "watching" | "completed" | "skipped" | "failed";
+  proposed: unknown;
+  actual: unknown;
+  comparison: unknown;
+  outputs: unknown;
+  detail: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+function toRunRow(r: typeof schema.routine_runs.$inferSelect): RoutineRunRow {
+  return {
+    id: r.id,
+    routine_id: r.routine_id,
+    agent_id: r.agent_id,
+    agent_version_id: r.agent_version_id,
+    trigger_event_id: r.trigger_event_id,
+    triggered_at: new Date(r.triggered_at).toISOString(),
+    case_ref: r.case_ref,
+    mode: r.mode,
+    status: r.status,
+    proposed: r.proposed,
+    actual: r.actual,
+    comparison: r.comparison,
+    outputs: r.outputs,
+    detail: r.detail,
+    created_at: new Date(r.created_at).toISOString(),
+    completed_at: r.completed_at ? new Date(r.completed_at).toISOString() : null,
+  };
+}
+
+/** One run per trigger event. A trigger seen again returns null, and nothing runs twice. */
+export async function createRoutineRun(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    id: string;
+    routine_id: string;
+    agent_id: string;
+    agent_version_id: string;
+    trigger_event_id: string;
+    triggered_at: string;
+    case_ref: string | null;
+    mode: "shadow" | "supervised";
+    status: "watching" | "completed" | "skipped" | "failed";
+    proposed: unknown;
+  },
+): Promise<RoutineRunRow | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .insert(schema.routine_runs)
+      .values({
+        id: input.id,
+        organization_id: ctx.organizationId,
+        owner_user_id: ctx.userId,
+        routine_id: input.routine_id,
+        agent_id: input.agent_id,
+        agent_version_id: input.agent_version_id,
+        trigger_event_id: input.trigger_event_id,
+        triggered_at: input.triggered_at,
+        case_ref: input.case_ref,
+        mode: input.mode,
+        status: input.status,
+        proposed: input.proposed,
+      })
+      .onConflictDoNothing()
+      .returning();
+    return rows[0] ? toRunRow(rows[0]) : null;
+  });
+}
+
+export async function completeRoutineRun(
+  sql: Sql,
+  ctx: UserContext,
+  id: string,
+  patch: {
+    status: "completed" | "skipped" | "failed";
+    actual?: unknown;
+    comparison?: unknown;
+    outputs?: unknown;
+    detail?: string | null;
+    completed_at: string;
+  },
+): Promise<RoutineRunRow | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .update(schema.routine_runs)
+      .set({
+        status: patch.status,
+        ...(patch.actual !== undefined ? { actual: patch.actual } : {}),
+        ...(patch.comparison !== undefined ? { comparison: patch.comparison } : {}),
+        ...(patch.outputs !== undefined ? { outputs: patch.outputs } : {}),
+        ...(patch.detail !== undefined ? { detail: patch.detail } : {}),
+        completed_at: patch.completed_at,
+      })
+      .where(and(eq(schema.routine_runs.id, id), eq(schema.routine_runs.status, "watching")))
+      .returning();
+    return rows[0] ? toRunRow(rows[0]) : null;
+  });
+}
+
+export async function listRoutineRuns(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { routine_id?: string | undefined; status?: RoutineRunRow["status"] | undefined } = {},
+): Promise<RoutineRunRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.routine_runs)
+      .where(
+        and(
+          ...(opts.routine_id ? [eq(schema.routine_runs.routine_id, opts.routine_id)] : []),
+          ...(opts.status ? [eq(schema.routine_runs.status, opts.status)] : []),
+        ),
+      )
+      .orderBy(desc(schema.routine_runs.triggered_at), schema.routine_runs.id);
+    return rows.map(toRunRow);
   });
 }

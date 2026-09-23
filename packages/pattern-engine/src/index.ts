@@ -7,6 +7,9 @@ export {
   MIN_EPISODE_EVENTS,
   MIN_EPISODE_ACTIVE_MS,
   DERIVED_DURATION_CAP_MS,
+  segmentByCase,
+  CASE_GAP_BOUNDARY_MS,
+  type CaseSegmentationOptions,
   type SegmentationOptions,
   type SegmentedEpisode,
 } from "./segmentation.js";
@@ -47,6 +50,8 @@ export {
 export { deterministicName, describeObserved, stepPhrase, type NamingResult } from "./naming.js";
 export {
   explainWorkflowSteps,
+  connectorPhrase,
+  CONNECTOR_PHRASES,
   type WorkflowExplanation,
   type ObservedStepExplanation,
   type StepAutomation,

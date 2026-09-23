@@ -27,6 +27,9 @@ import { runPredraft, type PredraftResult } from "./predraft.js";
 import { autoActions, sentFromMatchedDrafts, type ActionDeps } from "./actions.js";
 import { runOpportunityPass, type OpportunityPassResult } from "./opportunity-pass.js";
 import { runEventStep, type EventStepResult } from "./events.js";
+import { runDiscoveryStep, type DiscoveryOptions, type DiscoveryResult } from "./discovery.js";
+import { ensureRoutineAgents } from "./routine-agents.js";
+import { runRoutines, type RoutineRunResult } from "./routine-runs.js";
 import type { ContextComposer } from "@maman/voice-engine";
 import { toSyncedMessage } from "./content.js";
 import { matchSentDrafts } from "./voice.js";
@@ -81,6 +84,11 @@ export type GmailSyncJobDeps = {
    * sweep so this sweep's own writes are included.
    */
   events?: { window_days?: number | undefined } | undefined;
+  /**
+   * Discovery over the stream (DISCOVERY=on, the default). Absent → no
+   * routine is looked for. Runs after the event step, on what it wrote.
+   */
+  discovery?: DiscoveryOptions | undefined;
 };
 
 export type DealStepResult =
@@ -112,6 +120,8 @@ export type GmailSyncJobResult =
       actions: { proposed: number; auto_applied: number; auto_failed: number } | null;
       opportunity: OpportunityPassResult | null;
       events: EventStepResult | null;
+      discovery: DiscoveryResult | null;
+      routines: RoutineRunResult | null;
     }
   | { ok: false; reason: "no_connection" | "sync_failed"; error?: string };
 
@@ -281,6 +291,46 @@ export async function runGmailSyncJob(
       }))
     : null;
 
+  // Then what the stream says about this person's routines. Deterministic,
+  // bounded to the window, and never the reason a sweep fails.
+  const discovery =
+    deps.discovery && events
+      ? await runDiscoveryStep({ sql: deps.sql, now: deps.now }, ctx, deps.discovery).catch(
+          () => null,
+        )
+      : null;
+
+  // Accepted routines: compiled if they are not yet, then run on every new
+  // trigger, alongside the person (shadow) or through the existing jobs
+  // (supervised). Never the reason a sweep fails.
+  const routines =
+    deps.discovery && events
+      ? await ensureRoutineAgents({ sql: deps.sql, now: deps.now }, ctx)
+          .then(() =>
+            runRoutines(
+              {
+                sql: deps.sql,
+                now: deps.now,
+                contentKey: deps.contentKey,
+                ...(deps.predraft
+                  ? {
+                      drafting: {
+                        credentials: deps.credentials,
+                        transport: deps.transport,
+                        composer: deps.predraft.composer,
+                      },
+                    }
+                  : {}),
+                ...(deps.actions && deps.agent
+                  ? { proposing: { ...deps.actions, provider: deps.agent.provider } }
+                  : {}),
+              },
+              ctx,
+            ),
+          )
+          .catch(() => null)
+      : null;
+
   await markUserConnectionSync(deps.sql, ctx, conn.id, { ok: true, at: now });
 
   return {
@@ -303,6 +353,8 @@ export async function runGmailSyncJob(
     actions,
     opportunity,
     events,
+    discovery,
+    routines,
   };
 }
 

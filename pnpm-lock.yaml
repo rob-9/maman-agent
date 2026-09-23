@@ -903,6 +903,9 @@ importers:
       '@maman/agent-runtime':
         specifier: workspace:*
         version: link:../agent-runtime
+      '@maman/capability-catalog':
+        specifier: workspace:*
+        version: link:../capability-catalog
       '@maman/connector-adapters':
         specifier: workspace:*
         version: link:../connector-adapters
@@ -921,6 +924,9 @@ importers:
       '@maman/obligation-engine':
         specifier: workspace:*
         version: link:../obligation-engine
+      '@maman/pattern-engine':
+        specifier: workspace:*
+        version: link:../pattern-engine
       '@maman/policy-engine':
         specifier: workspace:*
         version: link:../policy-engine
@@ -934,9 +940,6 @@ importers:
         specifier: ^3.4.5
         version: 3.4.9
     devDependencies:
-      '@maman/pattern-engine':
-        specifier: workspace:*
-        version: link:../pattern-engine
       '@maman/tsconfig':
         specifier: workspace:*
         version: link:../tsconfig

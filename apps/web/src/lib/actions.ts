@@ -122,3 +122,20 @@ export async function proposeCrmUpdateAction(obligationId: string): Promise<void
   revalidatePath("/");
   if (!res.ok) throw new Error(`could not read the thread (${res.detail ?? res.status})`);
 }
+
+/** The person's word on a routine the agent found: accept, not now, or never. */
+export async function decideRoutineAction(
+  id: string,
+  decision: "dismissed" | "never" | "accepted",
+): Promise<void> {
+  const res = await me.decideRoutine(id, decision);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not save that (${res.detail ?? res.status})`);
+}
+
+/** Start a routine that has run alongside the person and agreed often enough. */
+export async function startRoutineAction(id: string): Promise<void> {
+  const res = await me.startRoutine(id);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not start (${res.detail ?? res.status})`);
+}

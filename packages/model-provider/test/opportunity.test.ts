@@ -129,3 +129,25 @@ describe("the deterministic reading", () => {
     ).toBeNull();
   });
 });
+
+describe("which sentence is the next step", () => {
+  it("an explicit 'next step' sentence beats a question that came before it", () => {
+    const out = readOpportunityDeterministically({
+      contact_display_name: "Sarah Chen",
+      account_name: "Northwind",
+      subject: "Enterprise pricing",
+      current: { stage: "Proposal", next_step: null, close_date: "2026-12-31" },
+      messages: [
+        {
+          from: "Sarah Chen",
+          direction: "inbound",
+          sent_at: "2026-09-18T10:00:00.000Z",
+          text: "Thanks Alex. Can you confirm the price holds for 60 seats if we start in November? Next step: send over the MSA for legal. We'd like to sign by end of quarter.",
+        },
+      ],
+    });
+    expect(out.next_step?.value).toBe("send over the MSA for legal");
+    expect(out.next_step?.quote).toBe("Next step: send over the MSA for legal.");
+    expect(out.close_date?.value).toBe("2026-09-30");
+  });
+});

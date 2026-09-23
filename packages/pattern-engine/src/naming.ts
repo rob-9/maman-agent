@@ -1,6 +1,6 @@
 import { capabilitiesForToken, NON_VALUE_HOLDING_ROLES } from "@maman/capability-catalog";
 import type { PatternCandidate } from "@maman/contracts";
-import { bareRoleNoun, roleNoun } from "./explain.js";
+import { bareRoleNoun, connectorPhrase, roleNoun } from "./explain.js";
 import type { SegmentedEpisode } from "./segmentation.js";
 
 /**
@@ -81,7 +81,7 @@ export function deterministicName(
   // single-app sentence hides half the work. The reconcile recipe keeps its
   // named title (its intent is a recognised shape, not a generic chain); the
   // intent chosen above is kept in every case, only the title improves.
-  if (intent !== "reconcile_account_list") {
+  if (intent !== "reconcile_account_list" && !connectorTitle(candidate.canonical_sequence)) {
     const chain = chainTitle(candidate.canonical_sequence);
     if (chain) title = chain;
   }
@@ -286,7 +286,26 @@ function mostCommon(values: string[]): string | null {
  * "Repeated 4-step workflow in the browser" — because an honest vague title beats
  * a confident meaningless one. Nothing here invents an app or an object.
  */
+/**
+ * A routine from the event stream, said as a sentence: "They reply, you
+ * reply, you meet, they reply." Only when every step has such a phrase; a
+ * screen routine keeps its own naming.
+ */
+export function connectorTitle(sequence: string[]): string | null {
+  const phrases: string[] = [];
+  for (const token of sequence) {
+    const phrase = connectorPhrase(token);
+    if (!phrase) return null;
+    if (phrases.at(-1) !== phrase) phrases.push(phrase);
+  }
+  if (phrases.length === 0) return null;
+  const sentence = phrases.join(", ");
+  return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+}
+
 export function describeObserved(sequence: string[], domainActions: string[]): string {
+  const connector = connectorTitle(sequence);
+  if (connector) return connector;
   const steps = sequence.map(parseStep);
   if (steps.length === 0) return "Repeated workflow";
 
@@ -457,6 +476,8 @@ function capitalize(text: string): string {
  * four times reads like filler and buries the one app switch that matters.
  */
 export function stepPhrase(sequence: string[]): string | null {
+  const connector = connectorTitle(sequence);
+  if (connector) return connector.charAt(0).toLowerCase() + connector.slice(1);
   const seen = new Set<string>();
   const parts: string[] = [];
   let lastApp: string | null = null;

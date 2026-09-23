@@ -25,6 +25,9 @@ import {
  * joined to its fact by us and by nobody else.
  */
 
+/** A meeting joins the routine of at most this many contacts who were in it. */
+const MEETING_CASE_CAP = 5;
+
 /** The connectors are one virtual device: nothing here was observed on a screen. */
 const CONNECTOR_DEVICE_ID = "1b7f4a2e-9c3d-4e5f-8a6b-7c8d9e0f1a2b";
 
@@ -33,7 +36,13 @@ export type DerivedEvent = { event: WorkflowEvent; dedupe_key: string };
 const hashId = (organizationId: string, kind: string, id: string): string =>
   createHash("sha256").update(`${organizationId}:${kind}:${id}`).digest("hex").slice(0, 32);
 
+/** The case a contact's events belong to. The same function the stream uses, so a view can join back. */
+export const caseRefFor = (organizationId: string, contactAddress: string): string =>
+  hashId(organizationId, "contact", contactAddress);
+
 type Shape = {
+  /** The party this is about: the contact. Becomes the case discovery groups by. */
+  contact_address?: string | null | undefined;
   occurred_at: string;
   source: WorkflowEvent["source"];
   app: string;
@@ -81,6 +90,10 @@ function build(ctx: UserContext, shape: Shape, dedupeKey: string): WorkflowEvent
     target: {
       ...(shape.role ? { role: shape.role } : {}),
       semantic_type: shape.semantic_type,
+      // The case: a salted hash of the contact, never the address.
+      ...(shape.contact_address
+        ? { stable_id_hash: hashId(ctx.organizationId, "contact", shape.contact_address) }
+        : {}),
     },
     context: {
       object_type: shape.object_type,
@@ -119,6 +132,7 @@ export function deriveEvents(ctx: UserContext, facts: EventFacts, now: Date): De
             : "received_more";
     out.push(
       derived(ctx, `message:${m.thread_external_id}:${m.message_external_id}`, {
+        contact_address: m.contact_address,
         occurred_at: m.sent_at,
         source: "google",
         app: "Gmail",
@@ -134,24 +148,34 @@ export function deriveEvents(ctx: UserContext, facts: EventFacts, now: Date): De
 
   for (const mt of facts.meetings) {
     // A meeting that happened. Not one that is booked, not one declined,
-    // not one cancelled: those are not things the person did.
+    // not one cancelled: those are not things the person did. It belongs to
+    // the routine around each contact who was in it (bounded), or to no
+    // case when nobody in it is a contact.
     if (mt.status !== "confirmed" || mt.self_response === "declined") continue;
     if (new Date(mt.ends_at).getTime() > now.getTime()) continue;
     const duration = Math.max(0, new Date(mt.ends_at).getTime() - new Date(mt.starts_at).getTime());
-    out.push(
-      derived(ctx, `meeting:${mt.external_id}:held`, {
-        occurred_at: mt.ends_at,
-        source: "google",
-        app: "Google Calendar",
-        event_type: "record_updated",
-        role: "attendee",
-        semantic_type: "meeting_held",
-        object_type: "meeting",
-        record: { kind: "meeting", id: mt.external_id },
-        item_count: mt.attendee_count,
-        duration_ms: duration,
-      }),
-    );
+    const contacts = mt.contact_addresses.slice(0, MEETING_CASE_CAP);
+    const cases: Array<string | null> = contacts.length > 0 ? contacts : [null];
+    for (const contact of cases) {
+      const key = contact
+        ? `meeting:${mt.external_id}:held:${hashId(ctx.organizationId, "contact", contact)}`
+        : `meeting:${mt.external_id}:held`;
+      out.push(
+        derived(ctx, key, {
+          contact_address: contact,
+          occurred_at: mt.ends_at,
+          source: "google",
+          app: "Google Calendar",
+          event_type: "record_updated",
+          role: "attendee",
+          semantic_type: "meeting_held",
+          object_type: "meeting",
+          record: { kind: "meeting", id: mt.external_id },
+          item_count: mt.attendee_count,
+          duration_ms: duration,
+        }),
+      );
+    }
   }
 
   for (const a of facts.actions) {
@@ -165,6 +189,7 @@ export function deriveEvents(ctx: UserContext, facts: EventFacts, now: Date): De
       // The click: the person approved this write.
       out.push(
         derived(ctx, `action:${a.id}:approved`, {
+          contact_address: a.contact_address,
           occurred_at: a.approved_at,
           source: "product",
           app: "inbox",
@@ -180,6 +205,7 @@ export function deriveEvents(ctx: UserContext, facts: EventFacts, now: Date): De
       // The write that landed, verified by read-back. Field names only.
       out.push(
         derived(ctx, `action:${a.id}:verified`, {
+          contact_address: a.contact_address,
           occurred_at: a.verified_at,
           source: "salesforce",
           app: "Salesforce",
@@ -194,6 +220,7 @@ export function deriveEvents(ctx: UserContext, facts: EventFacts, now: Date): De
     if (a.reverted_at) {
       out.push(
         derived(ctx, `action:${a.id}:reverted`, {
+          contact_address: a.contact_address,
           occurred_at: a.reverted_at,
           source: "product",
           app: "inbox",
@@ -210,6 +237,7 @@ export function deriveEvents(ctx: UserContext, facts: EventFacts, now: Date): De
   for (const d of facts.decisions) {
     out.push(
       derived(ctx, `decision:${d.obligation_id}:${d.outcome}`, {
+        contact_address: d.contact_address,
         occurred_at: d.decided_at,
         source: "product",
         app: "inbox",
@@ -227,6 +255,7 @@ export function deriveEvents(ctx: UserContext, facts: EventFacts, now: Date): De
     // The sentence itself stays in the intent store; this is that it happened.
     out.push(
       derived(ctx, `intent:${i.id}`, {
+        contact_address: i.contact_address,
         occurred_at: i.created_at,
         source: "product",
         app: "inbox",

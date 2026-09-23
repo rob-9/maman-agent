@@ -57,6 +57,12 @@ export function toPatternFeature(
           classifier_confidence: event.classification.confidence,
         }
       : {}),
+    // The case key, when the event names the party it is about. Carried, never
+    // minted: the source decides what a case is (the event stream says a
+    // contact). Only a 32-hex hash may ride, so a raw id cannot slip in here.
+    ...(event.target.stable_id_hash && /^[0-9a-f]{32}$/.test(event.target.stable_id_hash)
+      ? { case_ref: event.target.stable_id_hash }
+      : {}),
     sensitivity: event.sensitivity,
     excluded_from_learning: excludedFromLearning,
   };

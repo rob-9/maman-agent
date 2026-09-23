@@ -531,6 +531,53 @@ export const workflow_events = pgTable("workflow_events", {
   created_at: utc("created_at").notNull().defaultNow(),
 });
 
+/** Routines discovery found in the stream, and what the person said about each. See migration 0018. */
+export const routine_candidates = pgTable("routine_candidates", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  signature: text("signature").notNull(),
+  status: text("status", { enum: ["candidate", "eligible"] }).notNull(),
+  decision: text("decision", { enum: ["dismissed"] }),
+  decided_at: utc("decided_at"),
+  agent_id: uuid("agent_id"),
+  title: text("title").notNull(),
+  summary: text("summary").notNull(),
+  occurrence_count: integer("occurrence_count").notNull(),
+  distinct_day_count: integer("distinct_day_count").notNull(),
+  first_seen_at: utc("first_seen_at").notNull(),
+  last_seen_at: utc("last_seen_at").notNull(),
+  candidate: jsonb("candidate").notNull(),
+  naming: jsonb("naming").notNull(),
+  verdict: jsonb("verdict").notNull(),
+  evidence: jsonb("evidence").notNull(),
+  evaluated_at: utc("evaluated_at").notNull(),
+  created_at: utc("created_at").notNull().defaultNow(),
+  updated_at: utc("updated_at").notNull().defaultNow(),
+});
+
+/** Runs of an accepted routine: shadow comparisons and supervised outputs. See migration 0019. */
+export const routine_runs = pgTable("routine_runs", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  routine_id: uuid("routine_id").notNull(),
+  agent_id: uuid("agent_id").notNull(),
+  agent_version_id: uuid("agent_version_id").notNull(),
+  trigger_event_id: uuid("trigger_event_id").notNull(),
+  triggered_at: utc("triggered_at").notNull(),
+  case_ref: text("case_ref"),
+  mode: text("mode", { enum: ["shadow", "supervised"] }).notNull(),
+  status: text("status", { enum: ["watching", "completed", "skipped", "failed"] }).notNull(),
+  proposed: jsonb("proposed").notNull(),
+  actual: jsonb("actual"),
+  comparison: jsonb("comparison"),
+  outputs: jsonb("outputs"),
+  detail: text("detail"),
+  created_at: utc("created_at").notNull().defaultNow(),
+  completed_at: utc("completed_at"),
+});
+
 /** The intent store. See migration 0014. */
 export const intents = pgTable("intents", {
   id: uuid("id").primaryKey(),

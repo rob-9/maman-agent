@@ -73,6 +73,7 @@ export {
   type OpportunityPassResult,
 } from "./opportunity-pass.js";
 export {
+  caseRefFor,
   deriveEvents,
   runEventStep,
   EVENT_WINDOW_DAYS,
@@ -80,3 +81,44 @@ export {
   type EventStepDeps,
   type EventStepResult,
 } from "./events.js";
+export {
+  runDiscoveryStep,
+  DISMISSAL_COOLDOWN_DAYS,
+  CONNECTOR_OPPORTUNITY_THRESHOLD,
+  type DiscoveryDeps,
+  type DiscoveryOptions,
+  type DiscoveryResult,
+} from "./discovery.js";
+export {
+  decideOnRoutine,
+  routineView,
+  routineViews,
+  startRoutine,
+  type RoutineEvidenceView,
+  type RoutineView,
+  type RoutineStepView,
+  type RoutineWord,
+} from "./routines.js";
+export {
+  compileRoutine,
+  stepTokensOf,
+  triggerTokenOf,
+  ROUTINE_COMPILER,
+  type CompiledRoutine,
+} from "./routine-spec.js";
+export {
+  acceptedRoutines,
+  ensureRoutineAgents,
+  routineAgentState,
+  startRoutineAgent,
+  type EnsureAgentsResult,
+} from "./routine-agents.js";
+export {
+  actualChanges,
+  proposedChanges,
+  routineRunSummary,
+  runRoutines,
+  type RoutineRunDeps,
+  type RoutineRunResult,
+  type RoutineRunSummary,
+} from "./routine-runs.js";

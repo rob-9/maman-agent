@@ -222,3 +222,70 @@ function seededRandom(seed: string): () => number {
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
   };
 }
+
+/** Default gap that closes a case episode: three days of nothing on this party. */
+export const CASE_GAP_BOUNDARY_MS = 3 * 24 * 60 * 60 * 1000;
+
+export type CaseSegmentationOptions = {
+  /** Gap between two events on the same case that closes the episode. */
+  case_gap_boundary_ms?: number;
+};
+
+/**
+ * Segmentation for work that is spread over hours and days rather than
+ * minutes on a screen: a mailbox, a calendar, a CRM. An episode is what
+ * happened around one case (one party) until nothing happened on it for the
+ * gap. Events with no case are left out: they belong to nobody's routine as
+ * far as this segmenter can tell, and the time segmenter is for them.
+ *
+ * The same floors as the time segmenter apply (three events, ten seconds of
+ * active time), so a candidate is never cheaper to form this way.
+ */
+export function segmentByCase(
+  events: PatternFeatureEvent[],
+  options: CaseSegmentationOptions = {},
+): SegmentedEpisode[] {
+  const gapMs = options.case_gap_boundary_ms ?? CASE_GAP_BOUNDARY_MS;
+  const byCase = new Map<string, PatternFeatureEvent[]>();
+  for (const e of events) {
+    if (!e.case_ref || isBoundaryEvent(e)) continue;
+    const list = byCase.get(e.case_ref) ?? [];
+    list.push(e);
+    byCase.set(e.case_ref, list);
+  }
+  const episodes: SegmentedEpisode[] = [];
+  // Cases in a fixed order, so two runs over the same events agree.
+  for (const key of [...byCase.keys()].sort()) {
+    const sorted = [...byCase.get(key)!].sort((a, b) =>
+      a.occurred_at === b.occurred_at
+        ? a.monotonic_ms - b.monotonic_ms
+        : a.occurred_at < b.occurred_at
+          ? -1
+          : 1,
+    );
+    const derivedDurations = deriveDurations(sorted);
+    let current: PatternFeatureEvent[] = [];
+    let lastTime: number | null = null;
+    const flush = () => {
+      if (current.length === 0) return;
+      const episode = buildEpisode(current, derivedDurations);
+      if (episode) episodes.push(episode);
+      current = [];
+    };
+    for (const event of sorted) {
+      const t = Date.parse(event.occurred_at);
+      if (lastTime !== null && t - lastTime > gapMs) flush();
+      current.push(event);
+      lastTime = t;
+    }
+    flush();
+  }
+  episodes.sort((a, b) =>
+    a.started_at === b.started_at
+      ? a.episode_id.localeCompare(b.episode_id)
+      : a.started_at < b.started_at
+        ? -1
+        : 1,
+  );
+  return episodes;
+}

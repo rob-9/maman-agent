@@ -57,6 +57,7 @@ const FACTS: EventFacts = {
       status: "confirmed",
       self_response: "accepted",
       attendee_count: 3,
+      contact_addresses: ["bob@client.com", "sarah@acme.com"],
     },
     {
       external_id: "ev-future",
@@ -65,6 +66,7 @@ const FACTS: EventFacts = {
       status: "confirmed",
       self_response: "accepted",
       attendee_count: 2,
+      contact_addresses: ["bob@client.com"],
     },
     {
       external_id: "ev-declined",
@@ -73,6 +75,7 @@ const FACTS: EventFacts = {
       status: "confirmed",
       self_response: "declined",
       attendee_count: 2,
+      contact_addresses: ["bob@client.com"],
     },
     {
       external_id: "ev-cancelled",
@@ -81,6 +84,7 @@ const FACTS: EventFacts = {
       status: "cancelled",
       self_response: "accepted",
       attendee_count: 2,
+      contact_addresses: ["bob@client.com"],
     },
   ],
   actions: [
@@ -93,6 +97,7 @@ const FACTS: EventFacts = {
       verified_at: "2026-09-12T16:00:05.000Z",
       reverted_at: null,
       field_names: ["close_date", "next_step"],
+      contact_address: "bob@client.com",
     },
     {
       id: "0192b3c4-0000-7000-8000-00000000a002",
@@ -103,6 +108,7 @@ const FACTS: EventFacts = {
       verified_at: "2026-09-13T16:00:05.000Z",
       reverted_at: "2026-09-13T17:00:00.000Z",
       field_names: [],
+      contact_address: "bob@client.com",
     },
     {
       id: "0192b3c4-0000-7000-8000-00000000a003",
@@ -113,6 +119,7 @@ const FACTS: EventFacts = {
       verified_at: null,
       reverted_at: null,
       field_names: [],
+      contact_address: null,
     },
   ],
   decisions: [
@@ -121,6 +128,7 @@ const FACTS: EventFacts = {
       kind: "awaiting_them",
       outcome: "dismissed",
       decided_at: "2026-09-14T10:00:00.000Z",
+      contact_address: "bob@client.com",
     },
   ],
   intents: [
@@ -129,6 +137,7 @@ const FACTS: EventFacts = {
       source: "stated",
       scope_kind: "account",
       created_at: "2026-09-14T10:01:00.000Z",
+      contact_address: null,
     },
   ],
 };
@@ -162,7 +171,17 @@ describe("the event stream, derived from what is stored", () => {
 
   it("a meeting counts once it happened and the person was in it; declined, cancelled and future ones do not", () => {
     const derived = deriveEvents(ctx, { ...empty, meetings: FACTS.meetings }, NOW);
-    expect(derived.map((d) => d.dedupe_key)).toEqual(["meeting:ev1:held"]);
+    // Once per contact who was in it, so it joins each of their routines.
+    expect(derived.length).toBe(2);
+    expect(derived.map((d) => d.dedupe_key.startsWith("meeting:ev1:held:"))).toEqual([true, true]);
+    expect(new Set(derived.map((d) => d.event.target.stable_id_hash)).size).toBe(2);
+    const alone = deriveEvents(
+      ctx,
+      { ...empty, meetings: [{ ...FACTS.meetings[0]!, contact_addresses: [] }] },
+      NOW,
+    );
+    expect(alone.map((d) => d.dedupe_key)).toEqual(["meeting:ev1:held"]);
+    expect(alone[0]!.event.target.stable_id_hash).toBeUndefined();
     expect(derived[0]!.event.duration_ms).toBe(30 * 60 * 1000);
     expect(derived[0]!.event.context.item_count).toBe(3);
   });
@@ -223,5 +242,30 @@ describe("the event stream, derived from what is stored", () => {
     expect(new Set(a).size).toBe(a.length);
     const times = deriveEvents(ctx, FACTS, NOW).map((d) => d.event.occurred_at);
     expect([...times].sort()).toEqual(times);
+  });
+});
+
+describe("the case each event belongs to", () => {
+  it("is a salted hash of the contact, the same across a thread, a meeting, a write and a decision about them", () => {
+    const derived = deriveEvents(ctx, FACTS, NOW);
+    const bob = derived.filter(
+      (d) =>
+        (d.event.target.stable_id_hash !== undefined && !d.dedupe_key.includes("ev1:held:")) ||
+        d.dedupe_key.startsWith("message:"),
+    );
+    const keys = new Set(bob.map((d) => d.event.target.stable_id_hash));
+    // Messages with Bob, the write on Bob's deal and the dismissal about Bob share one case.
+    const message = derived.find((d) => d.dedupe_key === "message:t1:m1")!;
+    const write = derived.find((d) => d.dedupe_key.endsWith("a001:verified"))!;
+    const decision = derived.find((d) => d.dedupe_key.startsWith("decision:"))!;
+    expect(message.event.target.stable_id_hash).toMatch(/^[0-9a-f]{32}$/);
+    expect(write.event.target.stable_id_hash).toBe(message.event.target.stable_id_hash);
+    expect(decision.event.target.stable_id_hash).toBe(message.event.target.stable_id_hash);
+    expect(keys.size).toBeGreaterThan(0);
+    // A proposal with no contact, and a sentence about an account, have no case.
+    const intent = derived.find((d) => d.dedupe_key.startsWith("intent:"))!;
+    expect(intent.event.target.stable_id_hash).toBeUndefined();
+    // Never the address.
+    expect(JSON.stringify(derived)).not.toContain("bob@client.com");
   });
 });

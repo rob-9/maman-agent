@@ -53,6 +53,9 @@ import {
   skippedWithReasons,
   stateIntent,
   runGmailSyncJob,
+  routineViews,
+  decideOnRoutine,
+  startRoutine,
 } from "@maman/sync";
 import { createModelProvider } from "@maman/model-provider";
 import {
@@ -226,7 +229,14 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         state,
         ...(challenge ? { pkce_challenge: challenge } : {}),
       });
-      return { authorization_url: url, expires_in_seconds: 600 };
+      // Demo mode: there is no provider to consent at. The browser lands on
+      // our own callback with a demo code, and the same exchange, storage and
+      // redirect run as they would after a real consent.
+      const demoUrl = `${redirectUri}?code=demo&state=${encodeURIComponent(state)}`;
+      return {
+        authorization_url: env.CONNECTOR_MODE === "demo" ? demoUrl : url,
+        expires_in_seconds: 600,
+      };
     },
   );
 
@@ -326,6 +336,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
         actions: actionDeps(sql),
         // The event stream, unless switched off.
         ...(env.EVENT_STREAM === "off" ? {} : { events: {} }),
+        ...(env.EVENT_STREAM === "off" || env.DISCOVERY === "off" ? {} : { discovery: {} }),
         // The agent pass runs only when switched on; off means the list is
         // the deterministic ranking, exactly as before the agent existed.
         ...(agentOn
@@ -467,6 +478,52 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     const q = req.query as { limit?: string };
     const limit = Math.min(5000, Math.max(1, Number(q.limit ?? 500) || 500));
     return { events: await listWorkflowEvents(deps.sql, userCtx(principal), { limit }) };
+  });
+
+  // ---- routines discovery found, and the person's word on each ----
+
+  app.get("/v1/me/routines", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    return { routines: await routineViews(deps.sql, userCtx(principal), now()) };
+  });
+
+  const decideBody = z.object({ decision: z.enum(["dismissed", "never", "accepted"]) }).strict();
+
+  /** Not now (held back for the cooldown), never (an entry in the intent store), or accepted (also an entry). */
+  app.post("/v1/me/routines/:id/decide", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const body = decideBody.safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+    const id = (req.params as { id: string }).id;
+    const r = await decideOnRoutine(
+      { sql: deps.sql, contentKey: master, now },
+      userCtx(principal),
+      id,
+      body.data.decision,
+    );
+    if (!r.ok && r.reason === "not_found") {
+      return reply.status(404).send({ status: 404, title: "Not Found" });
+    }
+    if (!r.ok) return reply.status(409).send({ status: 409, reason: r.reason });
+    return { routine: r.routine };
+  });
+
+  /** Start: from running alongside the person to producing drafts and proposals for their approval. */
+  app.post("/v1/me/routines/:id/start", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const id = (req.params as { id: string }).id;
+    const r = await startRoutine(deps.sql, userCtx(principal), id, now());
+    if (!r.ok && r.reason === "not_found") {
+      return reply.status(404).send({ status: 404, title: "Not Found" });
+    }
+    if (!r.ok) return reply.status(409).send({ status: 409, reason: r.reason });
+    return { routine: r.routine };
   });
 
   // ---- actions: writes to the organization's CRM, with the receipts ----

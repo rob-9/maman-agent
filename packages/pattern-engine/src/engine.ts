@@ -69,6 +69,12 @@ export type EngineOptions = {
    * bars — feasibility and risk — apply to template candidates unchanged.
    */
   packs?: DomainPack[];
+  /**
+   * How events become episodes. Default: the time segmenter (minutes on a
+   * screen). Connector events use `segmentByCase`. Everything after
+   * segmentation (clustering, scoring, the bars) is the same either way.
+   */
+  segment?: (events: PatternFeatureEvent[]) => SegmentedEpisode[];
 };
 
 /** Effective bars: overrides merged over production defaults, clamped. */
@@ -127,7 +133,9 @@ export function runPatternEngine(
     1,
     Math.max(0, options.opportunity_threshold ?? OPPORTUNITY_THRESHOLD),
   );
-  const episodes = segmentEpisodes(events, options.segmentation ?? {});
+  const episodes = options.segment
+    ? options.segment(events)
+    : segmentEpisodes(events, options.segmentation ?? {});
 
   // Learn only from includable episodes; excluded ones still display in the
   // timeline but never feed a pattern.

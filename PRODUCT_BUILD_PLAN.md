@@ -15,9 +15,16 @@ Written 2026-09-21. Every "port" names a file verified to exist in
 
 ## 1. Product
 
-**One line:** an agent that notices what you're dropping, drafts the way you
-draft, executes across your stack, and learns your routines — earning autonomy
-one approval at a time.
+**One line:** an agent that captures what each person means and acts on it
+before they ask: it notices what they are dropping, writes the way they write,
+honours what they have said, executes across their stack, and learns their
+routines, earning autonomy one approval at a time.
+
+**The objective, stated plainly (2026-09-22):** the final product captures
+intent and proactively acts on it. Every input exists to reveal intent (what
+the person is trying to get done, with whom, how they do it) and every output
+is the agent acting on that intent with the least asking. Everything in this
+plan is measured against that.
 
 **Not** a prompt box (that's Claude), **not** a sequencer (that's Ergo), **not**
 an autonomous BDR (that's Artisan), and above all **not configured** — the
@@ -36,6 +43,140 @@ contract period. That is the customer's own stated reason tools die.
 L1 is the wedge (his #1 cause of lost deals). L4 is the moat and the answer to
 "how is this different from Artisan": **the input is not language, it is what you
 already did.**
+
+### The agent, and where the arithmetic sits
+
+This is the final product, not a demo. It is a general agent for each person,
+not a follow-up tool. The shape is fixed, and the loop is the product:
+
+```
+sources      →  one store per person   →  discovery      →  the agent         →  the ladder    →  actions
+(connectors,    (facts: contacts,          (which routines    (judges, proposes    (approve each,   (drafts, CRM
+ the product     threads, deals,            this person has,   with evidence,       then Always,     writes, sends,
+ itself, later   meetings; events:          from what they     compiles a routine)  shadow runs,     anything a
+ the device)     what they did, when)       actually did)                           receipts, undo)  capability does)
+```
+
+**Restated 2026-09-22, after the owner's correction.** The agent does not
+automate a workflow someone names. It finds the routines each person already
+does, proposes each one with the evidence, and runs it up the ladder. What
+was built through 2026-09-22 (notice a dropped follow-up, draft it, keep the
+CRM true) is **routine 1, found by hand**, built first so the store, the
+intent memory and the ladder had something real to run on. It stays, as the
+demo and as the first routine. It is not the product, and no more routines
+are written by hand from here. New work adds a source, a capability, or
+discovery. See "Routines are found, not configured" below.
+
+- **Adding a source means adding a connector, never changing the agent.** Each
+  connector feeds facts into the same per-person store through the same seam
+  (`DealSource`, the thread projection, the calendar projection). The agent
+  reads the store, not the connectors.
+- **The agent decides what to write, how, and when**, from three kinds of
+  context: what happened (the thread, the deal stage, the last meeting), how
+  this person writes (their own sent mail, and every edit they make to a
+  draft), and what they asked for ("always follow up two days after a demo").
+- **The deterministic detector is the trigger and the fallback, not the
+  product.** It decides that something happened worth looking at (a thread
+  went quiet, a meeting passed with nothing sent), for free, over every
+  thread, and puts a floor under trust: the agent can only act on things that
+  actually happened, and every card can show the fact behind it. The agent
+  decides whether it matters, what to say, and when. With the agent switched
+  off (`AGENT_MODE=off`) the product is the ranked list of facts and nothing
+  else, and that path stays tested in both modes for as long as it exists.
+- **Every model output is untrusted data.** It passes a strict schema, it can
+  narrow and annotate, it can never add an obligation, change a value, or
+  touch a permission. A failed judgment leaves the arithmetic in charge of
+  that item.
+
+### Routines are found, not configured
+
+A routine is a trigger, a sequence of steps on records, and a check that it
+landed. Nobody types one in. The agent finds them, in this order of sources:
+
+1. **Connector events, first.** Every fact a connector already syncs is also
+   an event about what the person did: sent a reply, booked a meeting, moved
+   a stage, logged a call, changed a field. The product's own clicks are
+   events too (approved, dismissed, edited, promoted). These land in the same
+   per-person store as `WorkflowEvent` rows (the canonical event contract in
+   `packages/contracts`, which carries roles, hashes, categories and counts,
+   never a body or a value). No device software is needed for this, so it
+   is where discovery starts.
+2. **The browser, second.** The Chrome extension for the surfaces with no API
+   (LinkedIn, the long tail), same event contract.
+3. **The device, third.** The macOS observer (accessibility API only, no
+   network) and Teach Mode, same event contract, for everything else. This is
+   the moat, and it widens what can be found; it does not change how.
+
+Over that stream, `pattern-engine` does what it was built for: segment
+episodes, cluster the repeats, score each candidate (how often, how many
+distinct days, risk, feasibility, minutes saved), and explain the steps in
+plain words. A candidate that passes the eligibility bars becomes a proposal
+on the Inbox: "After a meeting with someone on an open deal, you log a call
+and set the next step in Salesforce. Twelve times in the last month. Want me
+to?" The evidence is the episodes themselves. Accepting it is a confirmed
+intent entry (§ The intent store), never silent.
+
+An accepted candidate is compiled deterministically into an `AgentSpec`
+(`agent-runtime`: trigger, steps naming capabilities, inputs, verification)
+and then climbs the same ladder every write already climbs: shadow runs
+compared with what the person did, approval per run bound to the diff,
+"Always" once earned, gated by org risk policy, receipts, undo. The model
+names the routine and writes the plain-language plan; it never authors a
+write step, and the spec has nowhere for it to change risk or permissions.
+
+What this means for the code already here: `obligation-engine`, the judgment
+prompt, the drafting job and the two CRM write kinds are routine 1's trigger,
+judgment and capabilities. The ladder, the intent store, the connectors and
+the store are general and carry over unchanged. Stage moves, sending mail,
+Slack and HubSpot are capabilities and sources a found routine may need, so
+they are added as adapters when a routine needs them, not as workflows.
+
+### The intent store
+
+Intent is what the agent acts on, so it has one home per person. Three kinds
+of entries, all kept as sentences the person can read:
+
+1. **Stated.** Typed or spoken, in their words: "Don't chase Acme, their
+   procurement is slow." "Never follow up more than twice." "After a demo,
+   send a recap the same day." Speech is text after transcription; it lands
+   the same way.
+2. **Shown by action.** Dismissing a follow-up ("not needed, they signed"),
+   snoozing something twice, rewriting a draft, dropping the sentence the
+   agent keeps adding. Each is intent, recorded with its origin (which thread,
+   which action) instead of thrown away after the click.
+3. **Confirmed.** What the agent infers from actions ("you wait a week before
+   chasing Acme") is held as a proposal until the person sees it and keeps it.
+   Nothing inferred becomes permanent silently.
+
+Each entry carries its source, its time and its scope: this contact, this
+account, this kind of situation, or everything. Entries are encrypted to the
+person like their mail, bounded and secret-checked like everything that
+reaches a model, never shared across a team, never visible to an admin.
+
+**How it is used.** Retrieved by relevance at the moment of judgment or
+drafting: this contact first, then the account, then the situation, then the
+general entries. Where an entry is enforceable by rule ("never more than
+twice", "not Acme") it is enforced by rule in detection, so it holds with the
+agent off. Where it is about judgment or voice ("recap same day", "sign off as
+Cheers, A") it goes to the model as the person's own instructions, marked as
+theirs, and grounding still applies. No entry can change a permission, a deal
+value, or what the detector counts as fact. Contradictions resolve to the
+newest stated entry, and the agent says when it did that.
+
+**How it is surfaced.** The card and the draft name the entry that applied:
+"Skipped: you said not to chase Acme." "Drafted the recap you asked for after
+demos." The store is a page the person can read, correct and delete from. A
+memory that cannot be seen is a bug waiting to be trusted.
+
+**How what is already built serves this.** The connectors and the store are
+intent's evidence: whom the person talks to, what was asked, what they
+promised in meetings, what is at stake in the CRM. The detector is the
+trigger that says something needs intent applied now. The judgment is the
+agent reading the evidence for what is actually owed. The voice is intent
+about how this person writes, learned from their own mail. The draft record
+and the edit ratio are intent shown by action, captured. The trust ladder is
+intent about how much the person wants done without asking. Each of these
+feeds the store or is fed by it; none is a feature on its own.
 
 ### The trust ladder
 
@@ -178,6 +319,29 @@ this design could violate its own boundary. So: **opt-in, aggregate-only, minimu
 cohort, and off unless the org and the individual both enable it.** Maman's
 `allow_pattern_sharing` and `min_cohort_size` are the right shape; port them.
 
+### Mail content is an input
+
+The agent reads whole conversations, not headers. Decided 2026-09-21 for the
+final product: message bodies are synced and stored per person so the agent
+has the full thread, the relationship so far (every other thread with that
+contact), and the person's own writing as voice, without asking Gmail again
+each time.
+
+The conditions that make this acceptable, and they are enforced in code, not
+policy: bodies are stored only as ciphertext under the person-bound envelope
+key (the AAD names the organization, the user and the provider), so a row
+copied to a colleague's account fails to open and a breach of the table
+yields ciphertext. Rows are under the same row-level security as everything
+the person owns. Only that person's agent decrypts them: never an admin,
+never a log, never analytics, never a client response. The model gets a
+bounded slice (last eight messages, four thousand characters each). Full
+text search over the store is impossible by construction; the agent
+retrieves by contact and thread.
+
+Cost is controlled by Gmail's per-thread history id: a listed thread whose
+id has not moved is not fetched again, so a full-content sync every fifteen
+minutes costs one list call plus one fetch per changed thread.
+
 ### Onboarding is per user and must be zero-config
 
 Connect two accounts, see a ranked list. No admin setup step, no workflow
@@ -198,6 +362,11 @@ policies                                    org-scoped (ceilings only)
 -- everything below is USER-owned: (organization_id, owner_user_id)
 connections            per-user OAuth grants; tokens envelope-encrypted
 contacts, threads, deals        synced projections from THEIR connectors
+messages               mail content, ENCRYPTED to the person (see below)
+drafts                 what the agent wrote, matched later to what was sent
+meetings               calendar events, agenda ENCRYPTED to the person; last/next stamped on contacts
+intents                the intent store: stated, shown by action, confirmed; ENCRYPTED to the person
+thread_assessments     the agent's judgment per thread state
 obligations            detected, ranked, with a reason
 suggestions            what was surfaced, and the outcome
 voice_exemplars        style samples from their own sent mail
@@ -396,22 +565,36 @@ Each of these is real, found in this codebase, and cost something.
 
 ### Progress
 
-| Item                                                            | State                                                                                                                                            |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `obligation-engine` (L1 detection)                              | ✅ 24 tests, 3 drilled                                                                                                                           |
-| Two-level tenancy (migration 0008)                              | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd                                                               |
-| `withUser` transaction helper                                   | ✅ separate from `withTenant` by design                                                                                                          |
-| User-isolation integration tests                                | ✅ 10 tests, two users in ONE org                                                                                                                |
-| Gmail sync (metadata-only, per-user credentials)                | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled                                                                 |
-| **L1 vertical slice** — mailbox → rows → detector → ranked list | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills                                                         |
-| Per-user vault (`user_connections`)                             | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end                                                                 |
-| **`/v1/me/*` — the demo path over HTTP**                        | ✅ connect Gmail → sync → ranked list → act; 11 integration tests, two users in one org; 2 drills                                                |
-| `@maman/sync` package                                           | ✅ sync job + per-user vault, consumed by api now and worker in Phase 2                                                                          |
-| CRM connector                                                   | ☐ next — find out which CRM first                                                                                                                |
-| Web UI — Inbox + Connections                                    | ✅ `apps/web` is the product; server components + server actions, identity never in the browser; admin moved under `/admin`                      |
-| Draft creation (`gmail.compose`, never send)                    | ✅ `gmail-draft.ts` + `voice-engine` deterministic composer + `POST /v1/me/obligations/:id/draft`; failure branch tested                         |
-| Real auth (WorkOS AuthKit)                                      | ✅ `apps/api/src/workos.ts` JWKS verifier + JIT-provisioning resolver; web sign-in/out via `authkit-nextjs`; 12 unit + 12 integration, 3 drilled |
-| Scheduled sweeps (worker)                                       | ✅ `workspaceSweepWorkflow` + `listSweepTargets` inside RLS + Temporal Schedule (SKIP overlap); 5 + 4 integration, 3 drilled                     |
+| Item                                                               | State                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `obligation-engine` (L1 detection)                                 | ✅ 24 tests, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Two-level tenancy (migration 0008)                                 | ✅ `user_connections`, `contacts`, `threads`, `obligations`; org+user RLS, FORCE'd                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `withUser` transaction helper                                      | ✅ separate from `withTenant` by design                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| User-isolation integration tests                                   | ✅ 10 tests, two users in ONE org                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Gmail sync (metadata-only, per-user credentials)                   | ✅ `gmail-project.ts` pure + `gmail.ts` HTTP; 55 tests in the package, 7 drilled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **L1 vertical slice** — mailbox → rows → detector → ranked list    | ✅ `runGmailSyncJob`; proven on a real DB under real RLS (5 integration tests); 3 drills                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Per-user vault (`user_connections`)                                | ✅ envelope AAD now binds `user_id`; stolen-ciphertext refusal tested end to end                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **`/v1/me/*` — the demo path over HTTP**                           | ✅ connect Gmail → sync → ranked list → act; 11 integration tests, two users in one org; 2 drills                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `@maman/sync` package                                              | ✅ sync job + per-user vault, consumed by api now and worker in Phase 2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| CRM connector — Salesforce                                         | ✅ adapter + resolver + sweep/API wiring + **Connections page**: Connect/Disconnect Salesforce for the team, logos, status, OAuth landing banner; 12 + 5 unit, 5 + 3 integration, 3 drilled. HubSpot ☐ (Phase 2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| The agent pass (AGENT_MODE=assist)                                 | ✅ reads candidate threads in full, model judges owed/ask/urgency behind a strict schema, stored per thread state; deterministic list unchanged with the switch off; 29 + 6 unit, 4 + 6 + 2 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Mail content as input                                              | ✅ full threads synced and stored encrypted to the person (`messages`, 0011), unchanged threads skipped by history id, the agent reads the store plus the relationship so far; Gmail is the fallback                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Voice: the agent writes the draft                                  | ✅ model composer behind the switch, voice retrieved from the person's own mail (to this contact, past follow-ups, recent), grounding enforced in code, template fallback with reason; drafts recorded and matched to what was sent (edit ratio); 12 + 3 + 1 unit, 3 + 2 + 1 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Google Calendar as input                                           | ✅ one Google consent (mail + calendar), meetings stored per person with the agenda encrypted, incremental sync by token, last/next meeting stamped on contacts, a booked call cancels a chase, meetings reach judgment, draft (grounded) and card; 7 + 5 + 3 unit, 3 + 3 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| The intent store                                                   | ✅ stated and observed entries, encrypted to the person, scoped to contact/account/situation; rules (don't chase X, no more than N) enforced in detection with the agent off; guidance to the model as the person's instructions; set-aside items shown with the sentence that did it; a box to tell the agent, a list to forget from; 14 + 1 unit, 3 + 3 + 3 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                            |
+| Pre-drafting, and the measure shown                                | ✅ the sweep drafts what the agent judged owed (top 3 per sweep, one unsent draft per thread, never when the person said not to), through the same job a click uses; the card says "Draft ready" and opens it in Gmail; "This week: N drafts, M sent, K as written" on the Inbox; 1 + 1 unit, 2 + 3 + 2 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Phase 3, first write: Salesforce activity log                      | ✅ propose the exact diff from witnessed facts, approval bound to its hash, applied exactly once by marker, verified by an independent read, receipt row, audit event, undo with read-back, promotion ("Always") as a stated intent bound to the write's shape and gated by org policy; a Salesforce section on the Inbox; 4 + 2 + 1 unit, 9 + 3 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                         |
+| Phase 3, second write: next step and close date on the opportunity | ✅ read from the thread with the sentence for each field, grounded in code (the quote must be in the thread, the date must be what the quote says), proposed only where the record differs, never over a hand edit (stale, both values shown), written field by field, verified by read-back, undo restores the previous values, medium risk so "Always" only where the organization lists it; "Update Salesforce" on a card with an open deal and in the sweep; 8 + 2 unit, 6 + 1 integration, 4 drilled                                                                                                                                                                                                                       |
+| Routines found, not configured (the spine, restated 2026-09-22)    | ⬜ the follow-up lane above is routine 1, found by hand; Phase 3 from here is discovery on connector events, the proposal card, compile to a spec, the ladder for found routines; no more hand-written routines                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Phase 3, step 1: the event stream                                  | ✅ every synced fact and every click derived into the person's store as canonical `WorkflowEvent` rows (migration 0017): source, app, event type, role, semantic type, object type, a salted one-way hash of the record, counts, time; never a body, address, subject or raw id; ids a function of the fact so a re-derivation is the same set; backfill then only what moved; refused whole when one event breaks the contract or names another person; `EVENT_STREAM=off` derives nothing; `GET /v1/me/events`; 7 unit, 4 + 4 + 2 integration, 4 drilled                                                                                                                                                                      |
+| Phase 3, step 2: discovery                                         | ✅ the pattern engine over each person's stream in the sweep, segmented by case (the contact) and days of quiet through a new `segmentByCase` and an engine `segment` option; connector tokens mapped to real capabilities (draft, read); candidates stored per person by signature (migration 0018) with the engine's word beside the person's (not now with a cooldown, never, accepted); `GET /v1/me/routines` in plain words with every bar it misses; `DISCOVERY=off`; 5 + 1 + 1 unit, 3 + 4 + 1 integration, 5 drilled                                                                                                                                                                                                    |
+| Phase 3, step 3: the proposal card                                 | ✅ a Routines section on the Inbox: each eligible routine in plain words with its steps, what a helper could do for each, and the evidence (how often, on how many days, around whom by name); Accept, Not now, Never; "not now" on the row with the cooldown, "accepted" and "never" as entries in the intent store bound to the routine's signature, so forgetting the entry is the undo; a forming routine cannot be accepted; forming routines listed with what they still need; 2 + 2 unit, 3 + 4 + 1 integration, 5 drilled                                                                                                                                                                                               |
+| Phase 3, step 4: compile and run                                   | ✅ an accepted routine compiled deterministically into an immutable AgentSpec (trigger from its first step, every later step on the catalog's capability, never in write mode) and stored as an agent in shadow; one run per trigger event after acceptance; shadow runs record which steps the routine would take, wait for the episode to close, then compare with which steps the person took, with the gap named; three that agree make it ready; Start moves it to supervised, where a trigger produces a draft and a CRM proposal through the existing jobs, each still for approval; `routine_runs` (migration 0019); a decision on a card now lifts when the thread moves; 4 + 1 unit, 3 + 4 + 1 integration, 5 drilled |
+| The demo world (CONNECTOR_MODE=demo)                               | ✅ a scripted Gmail, Calendar and Salesforce in memory that answers the real adapters' requests with the real shapes, so every path runs unchanged on a machine with no credentials: eight threads, six meetings, eight deals, a routine repeated four times; writes land in it and are read back from it; "Connect Google" and "Connect Salesforce" land on our own callback with a demo code and the same exchange and storage run; the deterministic next-step reader now prefers the plainest sentence; routine steps in plain words; 4 + 1 unit, 2 integration                                                                                                                                                             |
+| Web UI — Inbox + Connections                                       | ✅ `apps/web` is the product; server components + server actions, identity never in the browser; admin moved under `/admin`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Draft creation (`gmail.compose`, never send)                       | ✅ `gmail-draft.ts` + `voice-engine` deterministic composer + `POST /v1/me/obligations/:id/draft`; failure branch tested                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Real auth (WorkOS AuthKit)                                         | ✅ `apps/api/src/workos.ts` JWKS verifier + JIT-provisioning resolver; web sign-in/out via `authkit-nextjs`; 12 unit + 12 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Scheduled sweeps (worker)                                          | ✅ `workspaceSweepWorkflow` + `listSweepTargets` inside RLS + Temporal Schedule (SKIP overlap); 5 + 4 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 **Landed defect, worth keeping:** the first RLS policy spelled the guard as
 `current_setting('app.user_id', true)::uuid`. That returns NULL only while a
@@ -601,40 +784,868 @@ with zero configuration" — is reachable end to end.
 Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
 **138** (sync 10, worker 11, db 63, api 54) · build 5/5.
 
-**Phase 1 — foundations + first value (2–3 weeks).**
-Monorepo, contracts, DB with RLS, real auth, Gmail + one CRM connected per user.
-`obligation-engine` (deterministic, unit-tested). Web UI: ranked obligations with
-a reason. Gmail **draft** creation — no send scope.
-_Exit:_ a team member logs in, connects two systems, and sees a real ranked list
-with zero configuration.
+**The CRM seam.** Everything the product needs from a CRM is one question —
+is there an open deal with this person, and how big — so that is the whole
+contract (`DealSource` in `connector-adapters/src/deals.ts`). Salesforce and
+HubSpot will implement it against Opportunity / Deal; the sync job, the
+repository and the detector never learn which one answered. The step runs
+between the mailbox write and detection, asks about THIS person's contacts
+only (the CRM connection is the organization's; the question is scoped to
+what one person can hold), and a CRM that is down does not take the mailbox
+down — the sync completes on the last known deal state and the result says
+the CRM was not heard.
 
-**Phase 2 — voice + breadth (3–4 weeks).**
-`voice-engine`: retrieve style exemplars from sent mail, generate drafts, record
-every edit as signal. Add Calendar, Slack, HubSpot/Salesforce, Apollo/Clay.
-Durable obligation sweeps on a schedule.
-_Exit:_ users prefer the generated draft to their own first attempt more than
-half the time, measured.
+The mistake caught before it shipped: my first version mapped "asked, and
+the CRM returned nothing" to `false`. The detector suppresses `false` as a
+finished relationship — so every prospect a rep had not entered in the CRM
+yet would have vanished from the list, which is most of them on most days.
+Tri-state, precisely: `true` open; `false` ONLY "deals exist and all are
+closed"; not returned → back to unknown (null), which also means a deal the
+CRM stops reporting stops promoting. A CRM signal for an address that was
+not asked is ignored — a CRM cannot introduce a contact — and an account
+name from the CRM fills a blank but never overwrites one already held.
 
-**Phase 3 — execution + the ladder (4–5 weeks).**
-Wire `capability-router`. CRM writes verified by independent API read. Approval
-bound to diff hash. Port `mesh-lifecycle` + `shadow.ts` so rungs are real.
-Chrome extension for LinkedIn and the long tail — **with self-observation
-suppression from the first commit**. Admin: aggregates only, minimum cohort.
-_Exit:_ an approved workflow runs again without asking, with a receipt and a
-one-click undo.
+**Phase 1 remaining:** the provider adapter behind `DealSource` — Salesforce
+(SOQL on Opportunity via OpportunityContactRole; org connection already
+plumbed: Connected App env, `/v1/connectors`, org vault) or HubSpot (Deals
+API with contact associations; provider registered, no adapter yet). One
+file plus its scripted-HTTP tests, once the customer's CRM is known.
 
-**Phase 4 — observation, the moat (5–6 weeks).**
-macOS agent (AX only, no-network CI scan). Trace capture → spec compiler.
-`pattern-engine` + the eligibility/profile diagnostics from day one. Teach Mode
-with its UI built in the same change.
-_Exit:_ a user does a routine once, is offered it, approves it, and it runs.
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**146** (sync 13, worker 11, db 68, api 54) · build 5/5.
 
-**Phase 5 — earned autonomy.** Unattended allowlist, plan-shape binding,
-org-policy gate, value-priced ops workflows (the $70–80K gifting anchor).
+**Salesforce, the first CRM.** The customer said Salesforce. The adapter
+(`connector-adapters/src/salesforce-deals.ts`) is READ-ONLY: one SOQL query
+per 200 addresses over `OpportunityContactRole` — deals this person is on,
+not deals at their company — following pagination, refreshing the token once
+on 401 and never looping, escaping every address into its SOQL literal. The
+credentials are the organization's connected Salesforce, so the org-level
+vault provider moved from the worker into `@maman/sync`
+(`createOrgVaultCredentialProvider`) where the API can share it; the worker
+re-exports it under its old name. `resolveDealSource` picks the org's
+connected CRM from `connector_accounts` — revoked or degraded connectors are
+not consulted, and a connector we have no deal adapter for is not a source.
 
-**A demo can be cut from Phase 1 in ~1 week** by narrowing to one user, Gmail +
-one CRM, drafts only, sandbox account. That is a slice of the real build, not a
-throwaway.
+Proven over HTTP on a real database: the org connects Salesforce, Alice's
+`/v1/me/sync` asks about HER contacts with the ORG token (a GET on the org's
+instance; her Gmail token appears nowhere), Bob's contact lands as
+`true / 40000.00 / Client Co` and Sarah, unknown to the CRM, stays `null` and
+stays listed. Bob's own sync in the same org never asks the CRM about anyone.
+Three drilled: closed opportunities counted as open, rows for strangers
+accepted, resolver ignoring connector status — each fails its test.
+
+**Phase 1 is complete.** Its exit — a team member logs in (WorkOS), connects
+two systems (Gmail per person, Salesforce per org), and sees a real ranked
+list with zero configuration, kept current by the sweep — is now reachable
+end to end. What is NOT exercised: a live round-trip against a real Salesforce
+org or a real WorkOS environment; both need credentials this machine does not
+hold. The dashboard steps are in `.env.example`.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**153** (sync 18, worker 11, db 68, api 56) · build 5/5.
+
+**The Connections page, and where a browser lands.** The demo has to be
+clickable end to end, so the page now carries both kinds of connection with
+their difference stated where the choice is made: **Yours** (Gmail —
+connected by you, readable only by you) and **Your team's** (Salesforce —
+connected once for the organization, used only to ask which of your contacts
+have an open deal). Each row: provider mark (inline SVG, no external assets),
+name, a status chip driven by the API's own states (`describeGmail` /
+`describeCrm`, unit-tested so the words cannot drift from the states), a
+one-line "what this reads", and the single right action — Connect,
+Reconnect, Check now, or Disconnect. Works at phone width without a
+horizontal scroll.
+
+Two API changes fell out of making it clickable. (1) Both OAuth callbacks
+used to answer JSON, which meant the browser — arriving from Google's or
+Salesforce's consent screen — landed on a JSON page at the API. They now
+303 to `${WEB_BASE_URL}/connections?provider=…&connected=1` or
+`…&error=exchange_failed`, and the page shows a banner. The URL carries the
+provider and the outcome, never a token or an id. (2) A replayed PKCE state
+was tolerated — the old test accepted 200, 400 or 502 — because the
+exchange simply ran without a verifier. It is now refused (`state_reused`)
+before any exchange, at both callbacks, and the test asserts the refusal
+and that nothing was stored.
+
+Still true: none of this has touched a real Google, Salesforce or WorkOS;
+the three sets of credentials are the next step and need no more code.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**154** (sync 18, worker 11, db 68, api 57) · build 5/5.
+
+**The agent pass.** The direction, decided with the owner: the connectors
+feed facts into one place per person, and an agent reads those facts and
+decides what to write. The deterministic detector is kept, on purpose, as
+the trigger and the fallback. It still runs first and finds the candidates;
+the agent looks only at those.
+
+What changed. The Gmail scope is now read-only mail rather than metadata.
+Detection still reads headers only, and the database still holds no message
+text. The body of a candidate thread is read at judgment time, through a
+separate reader, bounded (last 8 messages, 4000 characters each, quoted
+history and signatures cut), handed to the model, and dropped. What is
+stored is the judgment: owed or not, the ask in a few words, one sentence
+for the card, urgency, confidence. The ask is an excerpt, so the honest
+wording on the Connections page is "message text is never stored", not
+"never read".
+
+The contract (`assessmentInputSchema` / `assessmentOutputSchema`) bounds
+every field and refuses secret-shaped text before it can reach a model.
+The output cannot add an obligation, change a deal value, or touch a
+permission: it narrows (owed false hides the item while the agent is on)
+and annotates. Two providers implement it. The deterministic one uses rules
+(a question in the last message is the ask; "thanks, all set" or an
+out-of-office means nothing is owed) so the whole path runs with no key and
+sets the floor the model has to beat. The Anthropic one sends the thread
+inside untrusted tags at temperature 0 and validates the JSON on the way
+back.
+
+The switch. `AGENT_MODE=off` (default) is the list exactly as before this
+work; `assist` turns the pass on in both places a sync runs. A judgment is
+stored per thread state, reused while the thread is unchanged, stale the
+moment it moves, and never made for more than 20 candidates per sweep. A
+judgment that fails, for any reason, leaves the arithmetic in charge of
+that item, and the pass never throws. Reverting is the variable.
+
+Tests. 29 unit for the contract and the rules (secret refusal, bounds, the
+ask, closed loops, automated replies, a thanks with a question still owed);
+6 for body extraction and the content read (plain over html, quoted history
+cut, oldest first, direction from the user's own addresses, bounded; exact
+GET, refresh once on 401). db: judgments stored per state, agent mode hides
+not-owed and reorders by urgency within a band never across one, staleness,
+isolation. sync: the pass reads each candidate once, the facts and the text
+reach the model, the body is in no table afterwards, unchanged threads are
+not judged again, a moved thread is judged again and only that one, model
+down keeps the arithmetic list, bounded. api: assist over HTTP reads the
+candidates in full and the list leads with the judgment; off is the
+deterministic list and says so. Three drilled: agent mode not hiding
+not-owed, re-judging unchanged threads, treating a stale judgment as fresh.
+
+Next in this direction: the model writes the draft with the thread and the
+person's own sent mail as voice, then Calendar, then pre-drafting in the
+sweep.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**166** (sync 24, worker 11, db 72, api 59) · build 5/5.
+
+**Mail content as the input.** Decided with the owner for the final product
+and described in §5 ("Mail content is an input"): whole threads are synced
+and stored, encrypted to the person, and the agent reads the store plus the
+relationship so far. Gmail is asked directly only for a thread the store
+does not hold. Unchanged threads are skipped by history id, so the full
+content sync stays affordable every fifteen minutes. The Connections page
+says what is true: mail is read so the agent has the full conversation,
+stored encrypted to the account, visible only to the owner.
+
+Tests. Adapters: full fetch only for changed threads, a thread with no
+history id is always fetched, projected messages carry text, direction and
+order. Content: round trip, refused for a colleague and for another key.
+Sync: bodies stored and the plaintext in no table, opens only for the owner,
+a second sync of an unchanged mailbox fetches nothing, the agent reads the
+store and Gmail is not asked, the relationship reaches the model. db: store
+beside the thread, replace on re-sync, history ids, relationship excludes
+the current thread, voice sample is outbound and substantial, colleague
+reads nothing, cascade on thread delete. Three drilled: unchanged threads
+fetched anyway, the content AAD without the user, the pass ignoring the
+store.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**170** (sync 25, worker 11, db 75, api 59) · build 5/5.
+
+**Voice.** The agent writes the draft. Style comes from everything the
+person has written, retrieved from the store in three shelves, most
+specific first: their messages to this contact, their past follow-ups (an
+outbound message whose predecessor in the thread was also theirs, which is
+what a chase looks like), and a sample of their recent writing. Facts come
+only from the thread and the facts we hold, and that is enforced, not
+requested: `groundDraft` checks every number, sum of money, URL and
+committing word (meeting, contract, discount, a weekday) against the thread,
+the subject, the ask and the deal value. The person's own exemplars are
+deliberately not a source, so a number from another deal cannot leak into
+this one. A draft that fails grounding, or a model that fails, gives way to
+the template composer and the response says why (`fallback_reason`).
+
+Every draft is recorded (body encrypted to the person). On the next sync,
+the first outbound message on that thread after the draft was made is what
+the person actually sent, and the edit ratio (1 = sent as written) is
+recorded. That is the product's own measure of its voice
+(`draftOutcomes`), and the sent message itself becomes an exemplar for the
+next draft, so the voice converges without any setting. The record of a
+draft outlives the obligation row: the sweep rewrites pending obligations,
+and a measurement must not vanish with them (learned the hard way; the
+foreign key is SET NULL, not CASCADE).
+
+With the agent off, the template composer writes, grounded by construction,
+and signs off the way the person does.
+
+Tests. Grounding: passes a draft whose every number, sum, day and claim is
+in the thread; refuses an invented number, sum, URL, discount, meeting and
+day; exemplars cannot vouch for a fact. The composer: uses the model's draft
+with provenance, falls back on failure and names it, falls back on an
+invented fact and names the violation. db: voice retrieval per contact and
+follow-ups by predecessor, drafts recorded encrypted, matched, measured,
+colleague sees nothing. sync: voice from the store, a lightly edited sent
+message matched at above 0.85. api: with the agent on, the draft answers the
+actual ask, is filed on the thread, recorded encrypted, and nothing is sent.
+Three drilled: trusting the model without grounding, a sent message from
+before the draft counting, any outbound message counting as a follow-up.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**176** (sync 27, worker 11, db 78, api 60) · build 5/5.
+
+**Google Calendar.** Meeting context is an input everywhere, not a stamp on
+one field. One Google consent now covers mail and calendar; a grant made
+before the scope existed reports `no_calendar_scope` until the person
+reconnects once. Meetings are synced on the same grant, read only, stored
+per person with the agenda encrypted like mail, and kept current with
+Google's incremental sync token (a stale token is a full window again, not
+an error). Every contact carries two stamps the sync recomputes in one
+statement: the last meeting with them and the next, counting a meeting only
+when it is not cancelled and the person did not decline.
+
+Where it lands. Detection: "met them, sent nothing" is counted from a real
+meeting, and a meeting already booked with the person cancels a chase (a
+chase on Tuesday about a call on Wednesday is noise). A reply they are
+waiting on is still owed; a booked call does not answer an email. The
+judgment: the last meeting (title, when, the agenda) and the next one are in
+the input, and the rules say "you are meeting them Thursday; no chase
+needed". The draft: a meeting is a fact, so its title and its day may be
+named and an invented day is refused; the template names the meeting it
+follows up. The card: "You met 2 days ago for 'Pricing review' and nothing
+has gone out since", and "Meeting Thursday: Kickoff" on the fact line.
+
+Tests. Projection (7): the other people lower-cased with names and
+responses, times in UTC, what is not a meeting dropped, all-day kept, an
+outside organizer counted, declines and cancellations recorded. Sync (5): a
+bounded window and a token on the first sync, the token and no window after,
+pages, cancellations, 410 is a full window again, refresh once on 401.
+Detector (3): a booked meeting cancels a chase up to the moment it starts
+and not after, a reply owed stays owed, the meeting a follow-up is counted
+from is carried. Judgment and draft rules with meetings. db (3): store,
+cancel, stamps with declines excluded and idempotent, listing, token,
+colleague sees nothing. sync (3): stored encrypted, stamped, token kept and
+sent, stale token handled, mailbox survives a calendar failure, the meeting
+reaches the agent. api: the step runs on every sync. Three drilled: a
+booked meeting no longer cancelling a chase, declined meetings stamping the
+contact, the token never kept.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**189** (sync 30, worker 11, db 81, api 60) · build 5/5.
+
+**The intent store, first cut.** What the person means now has a home. Two
+of the three kinds of entry are live: stated (typed, in their words) and
+observed (a dismissal with its reason; a draft rewritten below half). Each
+is encrypted to the person, scoped by resolving names, addresses and
+accounts against their own contacts (a first name counts when it names
+exactly one contact; a bare address answers to its local part), and kept
+with its enforceable form beside it when the sentence is a rule.
+
+Two rules are recognised deterministically and enforced in detection, so
+they hold with the agent off: "don't chase X" (in its everyday forms) and
+"no more than N" (words or digits, bounded), the latter counting the
+person's trailing unanswered messages on the thread (`chase_count`, kept by
+the sync). A rule can only set an obligation aside; it never touches a reply
+the person owes, because what they asked about was chasing. What is set
+aside is stored as `skipped` with the rule that did it, rewritten by every
+sweep, so forgetting the rule brings the item back on the next sync. The
+Inbox shows "Set aside by what you said" with the sentence.
+
+Everything that is not a rule is guidance: retrieved for the model most
+specific first (this contact, the account, the situation, then general),
+bounded, and passed as the person's own standing instructions to both the
+judgment and the draft. Grounding still applies to the draft; a preference
+cannot make a fact.
+
+Not yet: inferred entries ("you wait a week before chasing Acme") held as
+proposals for the person to confirm, and speech.
+
+Tests. Engine: scope resolution (name, address, account, longest match,
+unique first name, no false match inside a word), the two rules in their
+forms and bounds, guidance not mistaken for a rule, rules set aside chases
+in scope and never a reply owed, "no more than N" at the boundary, no rules
+no change. db: entries kept as ciphertext with scope and rule, retired;
+skipped stored with the rule and rewritten; a colleague sees none and
+cannot retire one. sync: a stated rule sets a chase aside and says why in
+the person's words, a reply owed untouched, forgetting brings it back;
+"never more than twice" counts chases; guidance reaches the model most
+specific first and only what bears on the contact. api: kept in the
+person's words, ciphertext at rest, visible only to them, retire is 404 for
+a colleague; a dismissal with a reason is written down; empty and
+oversized statements refused. Three drilled.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**202** (sync 33, worker 11, db 84, api 63) · build 5/5.
+
+**Pre-drafting, and the measure shown.** The product now does the work
+before being asked. After the agent pass, the sweep writes drafts for the
+top items the agent judged owed: three per person per sweep by default
+(`PREDRAFT_PER_SWEEP`, 0 disables), one unsent draft per thread, never for
+a person or account the owner said not to draft for ("don't write drafts
+for me", a rule like the others), and after judgment, never instead of it.
+A click and the sweep go through one job (`sync/draft-job.ts`), so a draft
+written before being asked is built from exactly the same context as one
+written on request. Still never sent.
+
+A draft now stays attached to its pending item instead of closing it: the
+card says "Draft ready" (or "Drafted", when a click made it) and opens the
+draft in Gmail, and the item leaves the list when the person sends it, or
+snoozes it, or says it is not needed. The earlier behaviour, where a manual
+draft marked the item drafted and removed it, is gone; a draft that nobody
+has sent is not a finished obligation. A Gmail refusal during the sweep is
+counted and retried next sweep, never raised.
+
+The measure is visible: "This week: N drafts, M sent, K as written" on the
+Inbox, from the edit ratio the sync records. Phase 2's exit is now a number
+the person and the owner both see.
+
+One thing surfaced and left as is: the sweep rewrites pending rows, so an
+obligation's id changes every sweep. The thread is the stable key. Actions
+taken on a stale id answer 404 and the page re-renders. Noted for a later
+pass; not a demo blocker.
+
+Tests. Engine: "don't draft for me" in its forms, scoped, never setting a
+detection aside. db: a draft rides on the list until matched, the newest
+unsent wins; the week's numbers are a window. sync: drafts only what was
+judged owed, once per thread, attached to the item, the next sweep writes
+nothing new; the rule holds the sweep back and a cap of 0 disables it; a
+Gmail refusal is counted, not raised. api: a click keeps the item pending
+with the draft attached across a sync, the week's numbers count it; with
+the agent on, the sync pre-drafts what it judged owed. Three drilled.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**212** (sync 37, worker 11, db 85, api 66) · build 5/5.
+
+**Phase 3 begins: the first write to a system of record.** An email the
+person sent is logged to Salesforce as a completed activity on the contact
+and, when there is one, their open opportunity. The CRM hygiene reps skip,
+and the safest write with real value: the agent witnessed the email, there
+is nothing to judge, and it can be undone.
+
+The safeguards from §7, each checkable on its own (`sync/src/actions.ts`):
+
+- **Propose.** The exact write as a diff (who, subject, date; never the
+  body, the CRM is shared) with its canonical hash, from evidence the agent
+  witnessed (the message id and time). One live proposal per message.
+- **Approve, bound to the hash.** An approval whose hash does not match the
+  diff marks it stale and writes nothing. A click and a promotion both go
+  through this.
+- **Apply, exactly once.** Re-proposed from current facts and compared with
+  what was approved (stale if different). Before creating, the ledger's
+  marker (`[maman:<action id>]`, carried in the task description) is
+  searched for, so a retry after an unknown result finds the task instead of
+  making a second.
+- **Verify, independently.** The task is read back through a separate GET
+  and compared field by field; only then is the action verified. A read-back
+  that disagrees is a failure, whatever the create call answered.
+- **Receipt and audit.** The row in `actions` (migration 0016) is the
+  receipt; an event goes on the organization's hash-chained audit log for
+  every transition that touched the provider.
+- **Undo.** Deletes the task and reads back that it is gone.
+- **Promotion.** "Always" writes a stated intent entry in the person's words
+  whose rule binds the action kind and the write's shape (kind + field
+  names), so it covers this write and no other. The sweep then approves and
+  applies without asking, under four independent conditions: the
+  organization's policy allows the kind unattended (`orgActionPolicy`; a
+  low-risk reversible kind by default, and `disabled_capabilities` forbids
+  it), the person promoted it, the shape matches, and the scope matches.
+
+Where it runs: "Log to Salesforce" on a card the person wrote last on, and
+the sweep for every draft matched to a sent message. The Inbox's Salesforce
+section shows proposals (Approve, Always, Not now) and outcomes ("Logged,
+verified", "Not written", "Undone") with Undo.
+
+Tests. Adapter (4): the SOQL for the contact and the open opportunity,
+escaped; the task created with no field the file does not name; read back
+by a separate GET, found by marker, deleted; refresh once, 5xx transient,
+4xx permanent, no connector refused. Hashes (2): canonical diff, shape by
+kind and field names. Rule (1): a promotion covers one kind and one shape
+in scope. Flow (9, real database, scripted Salesforce): proposed with the
+exact diff, never twice for one message, the body absent; a wrong hash is
+stale and writes nothing; approve, apply once, verified, receipt, audit
+chain valid; a retry after an unknown result finds the task by marker; a
+read-back that disagrees fails; undo; a contact Salesforce does not know
+fails with a reason; a promotion applied by the sweep, and the org
+forbidding it; the sweep proposes for a sent draft and a colleague sees
+none. API (3). Three drilled: approval no longer bound to the diff, the
+create call's answer trusted without read-back, no marker lookup before a
+retry. Each fails the test written for it.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 24/24 · integration
+**208** (sync 46, worker 11, db 85, api 66) · build 5/5.
+
+**Phase 3, second write: next step and close date on the opportunity
+(2026-09-22).** The first write the thread has to be _read_ for. The activity
+log is made of facts the sync witnessed (who, when, subject). The next step and
+the close date are claims in the text, so the reading is the model's and the
+checks are in code.
+
+The reading (`model-provider/src/opportunity.ts`). The contract asks for each
+field as a value plus the sentence it came from, or null when the thread says
+nothing new. Grounding refuses a field whose sentence is not in the thread
+verbatim, a next step that is not an excerpt of its sentence, and a close date
+that differs from what the code itself reads out of the sentence ("end of
+quarter" written on 2026-09-16 is 2026-09-30; a model that says 2026-11-15 for
+that sentence is dropped). The deterministic reader handles the plain forms
+("Next step: …", "I'll send …", "can you confirm …", "by end of quarter",
+"close by Friday") so the pass works with the model off. Refused fields are
+dropped one at a time; the other field still goes through.
+
+The write (`sync/src/actions.ts`, `connector-adapters/src/salesforce-opportunity.ts`).
+A second action kind, `salesforce.update_opportunity`, through the same
+propose, approve-by-hash, apply, verify, receipt, undo, promote path, with what
+differs:
+
+- **Only what differs.** The record is read first; a field already holding
+  what the thread says is not proposed. A closed opportunity is never touched.
+- **Never over a hand edit.** At apply time the record is read again. A field
+  whose current value is not the value the proposal was made against goes
+  stale, writes nothing, and the action shows both values. This is the rule
+  that keeps a CRM someone maintains by hand safe from an agent that read an
+  old thread.
+- **Field by field.** The PATCH names only the fields in the diff. The
+  read-back compares each named field; a 204 from Salesforce with the field
+  unchanged (a validation rule, a flow that resets it) is a failure.
+- **Undo is a write of the same shape** with the previous values, read back
+  the same way.
+- **Medium risk.** `orgActionPolicy` allows it, but not unattended unless the
+  organization lists the kind in `unattended_medium_capabilities`. "Always"
+  is offered on the card only when it is; a promotion made anyway is refused.
+
+Where it runs: "Update Salesforce" on a card whose contact has an open deal,
+and the sweep after judgment, over the whole detected list rather than the
+owed-only view. A deal moves in threads that owe no reply ("Thanks, next step
+is the MSA, signing by end of quarter" owes nothing and says two things the
+record should hold), so the candidates are the detected obligations with an
+open deal, bounded per sweep, one proposal per thread state.
+
+Tests. Reading (8): dates in each form; grounding refuses a paraphrased
+quote, a non-excerpt next step, a date the sentence does not say; the
+deterministic reader. Adapter (2): GET with the named fields, PATCH with only
+the fields asked, nothing sent for nothing, 404 as null, 4xx permanent. Flow
+(6, real database, scripted Salesforce): proposed with the two sentences and
+only the changed fields, not proposed twice, no "Always" by default; a hand
+edit makes the action stale and the field is untouched; approve, one PATCH
+with exactly the diff, GET before and after, verified, undo restores both
+values, audit chain valid; the organization allowing it unattended plus a
+promotion applies without asking with `approved_by = promotion`; a record
+that already holds the thread's values proposes nothing; a model that
+invents a date is refused and the date never reaches the record; a write
+Salesforce accepted but did not keep fails on read-back. API (1). Four
+drilled: the hand-edit check removed, the read-back ignored, the grounding
+violation no longer clearing the field, the adapter sending a field that was
+not asked for. Each fails the test written for it.
+
+Not exercised: a live Salesforce. The scripted one answers the same GET,
+PATCH and SOQL shapes the adapter sends; field-level security and validation
+rules on a real org are what the read-back and the permanent-error branch are
+for.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
+**215** (sync 52, worker 11, db 85, api 67) · build 5/5.
+
+**Phase 3, step 1: the event stream (2026-09-22).** The first piece of the
+general loop. Discovery needs to see what each person did, across every
+source, in one shape. That shape already existed: the `WorkflowEvent`
+contract the on-device observer was designed around, strict, carrying roles,
+categories, hashes and counts and refusing bodies, values and raw ids by
+construction. The stream reuses it unchanged, plus one new source value,
+`product`, for what the person does inside the Inbox.
+
+Derived, not observed. Every fact the sweep already stores becomes an event
+in the sweep's last step (`sync/src/events.ts`), so this needs no device
+software, no new consent, and can be rebuilt from nothing:
+
+- A message is the move it was: `sent_new`, `sent_reply`, `sent_chase`, or
+  the other side's `received_new`, `received_reply`, `received_more`, told
+  apart by position in the thread and the direction before it.
+- A meeting counts once it happened and the person was in it. Declined,
+  cancelled and future meetings are not things they did.
+- A write is three events: the click that approved it (only when a person
+  clicked, never a promotion), the write that landed with its field names,
+  and the undo. A proposal is nothing yet.
+- A decision on a card (dismissed, snoozed, drafted, resolved) and a
+  sentence given to the agent are product events on the item, not their
+  content. The sentence stays in the intent store.
+
+What an event carries about the record is a one-way hash salted with the
+organization, so the same thread in two organizations is two different
+hashes and nothing joins across them. Event ids are a function of the fact,
+so deriving twice, or on two machines, yields the same event and events in
+the same second keep one order. The dedupe key names the fact and the insert
+does nothing on conflict: the first run is a backfill over the window (90
+days), later runs derive only what moved since the last write, with an hour
+of overlap.
+
+Two layers refuse a bad event before SQL, each sufficient alone: the strict
+contract parse, and the forbidden-field scan the observer already uses. One
+bad event refuses the whole batch. An event naming another person is refused
+in code, and RLS would refuse it again. The stream is per person; a colleague
+reads none of it.
+
+Finding for step 2, recorded in a test rather than hidden: the pattern
+engine's segmentation was tuned for a screen. Episodes close after ten quiet
+minutes and need three events, so most connector events, hours or days
+apart, fall between episodes with the defaults. With day-wide boundaries the
+same events group. Discovery over connector events will segment by record
+(everything that happened around this thread, this deal, this meeting) and
+by day, not by minutes of screen activity. Every event does project to a
+valid feature without loss.
+
+Tests. Derivation (7, pure): every event passes the contract and the scan;
+the six message moves; meetings held versus declined, cancelled, future; the
+click, the write with field names, the undo, and a promotion that is not a
+click; decisions and sentences as product events; no raw id, address or
+subject anywhere and a different hash per organization; the same set with
+the same ids on a second derivation. Repository (4, real database): once per
+fact; the whole batch refused for a contract break, a forbidden field, or
+another person; facts read with thread position and previous direction and
+nothing else; a colleague reads none and cannot write in. Sweep (4): off
+derives nothing, on backfills everything stored including this sweep's own
+writes and clicks with no address or subject in it; a second run writes
+nothing until something moves, then exactly that; the stream projects to the
+engine and the segmentation finding above; a colleague's stream is empty.
+HTTP (2): a sync derives, the person reads their own, a colleague reads none;
+`EVENT_STREAM=off` derives nothing. Four drilled: the exactly-once insert
+made an upsert, the hash replaced by the raw id, the other-person check
+removed, and both refusal layers removed together. Removing either refusal
+layer alone does not fail the test, because the other holds; that is the
+point of two.
+
+Not exercised: a stream fed from an observer or the browser; those arrive in
+Phase 4 through the same table and the same contract. Not built yet: a page
+that shows the person their own stream. It comes with the proposal card,
+where the events are the evidence.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
+**225** (sync 56, worker 11, db 89, api 69) · build 5/5. Two integration runs
+made while unit tests and a build ran alongside failed at file level (a
+Postgres test container did not come up in time); the suites passed twice
+when run alone, and a container leaked by the interrupted run was removed.
+
+**Phase 3, step 2: discovery (2026-09-22).** The pattern engine, which
+existed for the on-device observer, now runs over each person's event stream
+in the sweep and finds the routines they have. No model anywhere in it.
+
+What had to change for a mailbox. The engine cut episodes by minutes of
+quiet on a screen and needed three events inside ten minutes. Around a
+contact, a routine is hours or days long: their reply arrives in the
+morning, the person answers after lunch, the deal is updated the next day.
+So segmentation is now a strategy the caller chooses (`segment` on the
+engine options), and `segmentByCase` groups events by the case they belong
+to and closes an episode after three days of quiet on that case. The case is
+the contact, carried as a salted one-way hash from the event's target into a
+new `case_ref` on the feature; only a 32-hex hash may ride there, so a raw id
+cannot. Events with no case are left to the time segmenter. The engine's
+floors (three events, ten seconds active) are unchanged, and everything after
+segmentation, clustering, scoring, the bars, the verdict, is the engine as it
+was.
+
+Two more things stood between a connector routine and eligibility, both
+fixed at the source rather than by loosening a bar. The catalog knew no
+capability for a mail event, so every reply scored as an unmapped UI write;
+it now maps a reply the person wrote to a draft (never a send) and a reply
+that arrived, or a meeting that happened, to a read. And a quarter of the
+engine's ranking score is projected time, estimated from seconds of screen
+activity that a connector stream does not have; discovery uses the same
+ranking bar with that quarter removed (`CONNECTOR_OPPORTUNITY_THRESHOLD`,
+0.40). The safety bars, similarity, feasibility and risk, are not tunable and
+were not touched. The person's clicks on the agent's own proposals are left
+out of the features: they are the ladder, not steps of their routine.
+
+What is stored (`routine_candidates`, migration 0018): one row per routine
+shape per person, keyed by its signature, rewritten every sweep with fresh
+counts, scores and the verdict, with the person's decision on it kept
+through the rewrite. "Not now" holds the shape back for the engine's
+cooldown (14 days) and the row says "you said not now"; "never" holds it for
+good. `GET /v1/me/routines` gives each routine in plain words: the steps as
+observed, which app, what a helper could do for each, how many times on how
+many days, the capabilities it would need, and every bar it misses, nearest
+first. The card that offers it is step 3.
+
+Tests. Engine (5): grouping by case across hours where the time segmenter
+would have split, days of quiet as the boundary, the floors kept, the same
+episodes in the same order run to run, the engine finding the routine
+through the case segmenter and not through the time one, the projection
+carrying only a hash. Catalog (1): the mail and meeting mappings. Stream
+(1): the case is the same hash across a thread, a write and a decision about
+one contact, a meeting joins each contact who was in it, never the address.
+Repository (3): a routine seen again is the same row and the decision
+survives; dismissed inside the cooldown and never for good; a colleague
+reads none and cannot decide. Sweep (4): a routine repeated around three
+contacts on different days is found, named, eligible, its steps all
+automatable through real capabilities, no address in what is shown, no
+click among its steps; "not now" holds it with the reason, lapses after the
+cooldown, "never" holds it for good; runs in the sweep after the stream and
+not with discovery off; a colleague has none. HTTP (1). Five drilled: the
+decisions not passed to the engine, the case segmenter removed, the clicks
+fed to the engine, the ranking bar left at the screen default, the upsert
+overwriting the decision. Each fails the test written for it.
+
+Not built: the card. Not exercised: a stream from an observer or the
+browser, where the time segmenter applies.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
+**233** (sync 60, worker 11, db 92, api 70) · build 5/5.
+
+**Phase 3, step 3: the proposal card (2026-09-22).** The first time a found
+routine reaches the person. A Routines section on the Inbox, one card per
+routine that cleared every bar: the title, the steps as observed and in which
+app, what a helper could do for each step (with approval, context only, or
+stays with you), and the evidence in one line: "Seen 4 times on 4 days,
+around Bob Ray, Sarah Chen and Dan Li." The names are the person's own
+contacts, joined back from the case hash with the same salted function the
+stream uses; nothing else about a run is shown. Routines still forming are
+listed underneath with what they still need ("not seen often enough yet").
+
+Three words, and where each lives. "Not now" is kept on the row with its
+date so the engine's 14-day cooldown can count, and it stops being a decision
+when the cooldown lapses. "Accepted" and "never" are entries in the intent
+store, in the person's words ("Do this for me when it comes up: …", "Never
+offer to take this over: …"), each carrying a rule bound to the routine's
+signature (`routine_accepted`, `routine_never`). That is where the person
+already reads and forgets what they told the agent, so forgetting the entry
+is the undo, and nothing is kept in two places. Discovery reads "never" from
+the store on every sweep. The two rules never set a chase aside or cover a
+write; they are about routines and nothing else.
+
+Accepting is the confirmed entry the plan asks for: what the agent inferred
+from the person's actions becomes permanent at the moment they keep it, and
+not before. A routine still forming cannot be accepted, however the request
+arrives; the API answers 409.
+
+Tests. Rules (2): the two rule shapes, never parsed from a sentence; neither
+sets a chase aside nor covers a write. Lines (2): the evidence line by name
+only, the forming line. Repository (3): a routine seen again keeps "not now"
+and the agent link through the rewrite; "not now" counts inside the cooldown
+and lapses; a colleague reads none and cannot decide. Sweep (4): the
+evidence names each run's contact; "not now" holds with its reason then is
+offered again; "never" is an entry in the store, forgetting it offers the
+routine again; "accept" is a confirmed entry in the person's words bound to
+the routine, and a forming one is refused. HTTP (1). Five drilled: "never"
+entries not consulted, accept allowed on a forming routine, "not now" never
+lapsing, the evidence joined with a different salt, routine rules setting
+chases aside. Each fails the test written for it. One drill variant (the
+old type-unsafe branch restored) passed by accident, because a missing
+`max` compares false; the test guards the outcome, not that line.
+
+Not built: what accepting leads to. That is step 4.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
+**236** (sync 63, worker 11, db 92, api 70) · build 5/5.
+
+**Phase 3, step 4: compile and run (2026-09-22).** What accepting leads to.
+
+Compile (`sync/src/routine-spec.ts`). An accepted routine becomes an
+`AgentSpec`, the contract the runtime already had, deterministically and with
+no model: the routine's first step is the trigger (something arrived, a
+meeting ended); every later step becomes a spec step on the capability the
+catalog names for it, a reply the person wrote as a draft, a CRM change as a
+proposal, a thing that arrived as a read. No step is ever compiled in
+`write` mode. A write happens only through the action ladder the proposal
+enters, with its own approval, read-back and receipt, or not at all. The
+agent id is a function of the person and the routine, the version id of the
+spec's content, so compiling twice is the same agent and the same version.
+Stored through the existing `agents` and `agent_versions` tables in state
+`shadow`, linked from the routine. A routine with a step no capability can do
+is refused, and the card says so.
+
+Run (`sync/src/routine-runs.ts`). After acceptance, each time the trigger
+happens in the person's stream there is one run, keyed by the trigger event
+(`routine_runs`, migration 0019), so a sweep never runs one twice. What a
+run does depends on the agent's state:
+
+- **Shadow.** Nothing is produced. The run records which steps the routine
+  would take on that case, by capability, waits for the episode to close
+  (three days of quiet, or every expected step seen), then records which
+  steps the person took and compares. Agreement is over which steps
+  happened, not the words or values; the routine does not know them and the
+  run does not store them. A gap is named in plain words ("I proposed
+  changing … but you didn't"). Three comparisons at 0.9 or better make the
+  routine ready to start; the card says "Ran alongside you 4 times, agreed 3
+  times. Ready to start."
+- **Supervised.** Start (a click, refused until ready) moves the agent to
+  supervised. A trigger then runs the steps through the jobs that already
+  exist for them, on the thread the trigger named: a draft in Gmail through
+  the draft job, never sent; a proposal in the Salesforce section through
+  the opportunity pass, never applied without approval or a promotion the
+  person made. The run records what it produced. A step with no job yet is
+  recorded as not run, never faked.
+
+Found on the way and fixed: a decision on a card ("not needed", "later")
+held the thread for good, even after the other side wrote again, because
+the row blocked any new detection on that thread. It now holds only while
+the thread stands still; once the thread moves, the detector looks again.
+
+What "runs alone" means from here: the proposals a supervised routine makes
+carry the same "Always" the CRM writes already have, gated by the
+organization's risk policy. Active state, where the routine's own writes
+apply under a promotion, is that promotion; nothing new is needed for it
+beyond what step 5 adds as capabilities.
+
+Tests. Compiler (3): trigger and steps, never write mode, deterministic ids,
+refusals. Comparison (1): what a shadow run proposes and what it counts as
+done, on the case and inside the window only. Line (1): the runs line.
+Repository (3): one run per trigger, complete only from watching once, a
+colleague reads none; plus (1) the lifted decision. Sweep (4): accepting
+compiled it, with a plan, and start is refused; one shadow run per trigger,
+never two, compared when closed, a partial run named, three that agree make
+it ready; start moves it to supervised and a sweep then produces a draft
+and a CRM proposal through the existing jobs without writing anything, and
+the same trigger does not run twice; a colleague cannot start it. HTTP (1).
+Five drilled: a step compiled in write mode, start without readiness, the
+actual events not filtered to the case, runs no longer deduped, a decision
+no longer lifting. Each fails the test written for it.
+
+Not exercised: an active routine applying its own writes; that is the
+existing promotion path, exercised for the two write kinds. Not built: the
+person's clicks inside the product as triggers.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
+**244** (sync 67, worker 11, db 96, api 70) · build 5/5.
+
+**The demo world (2026-09-22).** The owner asked to see the product and saw
+the empty state, because no mailbox was connected and there is no Google
+client on this machine to connect one. `CONNECTOR_MODE=demo` already existed
+as the switch for that case; it now has something behind it for the whole
+product, not only the old Salesforce fixtures.
+
+`connector-adapters/src/demo-world.ts` is a scripted Gmail, Google Calendar
+and Salesforce, in memory, that answers the same requests the real adapters
+send, with the same shapes: the profile, the thread list with history ids,
+full threads with bodies, drafts, events with a sync token, SOQL for deals,
+contacts, opportunity roles and tasks, task create, read and delete,
+opportunity read and patch. Writes land in it and are read back from it, so
+the read-back checks mean something even here. The story: eight threads
+(a reply owed on a deal with the next step in it, a renewal gone quiet, a
+fresh intro, a discovery call with nothing sent since, and a routine
+repeated four times around four contacts), six meetings held and one booked,
+eight deals. Dates are relative to the first request, so it is the same age
+whenever it runs. Nothing in the product is demo-only: this is the demo
+implementation of the connectors, as the deterministic provider is of the
+model.
+
+In demo mode "Connect Google" and "Connect Salesforce" return our own
+callback URL with a demo code, so the browser lands on the same callback
+and the same exchange, envelope encryption, storage and redirect run as they
+would after a real consent. The token transport answers any exchange or
+refresh with demo tokens. The worker uses the same world for its sweeps.
+
+Two things the first look showed and fixed. The deterministic next-step
+reader took the first sentence that matched anything ("Can you confirm the
+price holds…") over the plain "Next step: send over the MSA for legal" that
+came after it; it now prefers the plainest pattern anywhere in the message.
+And routine steps from the stream were phrased for a screen ("you update a
+record in Gmail"); they now read as the person would say them ("they reply",
+"you reply", "you meet") and the title is the sentence of them, and each step
+says whether the agent would notice it or would do it with approval.
+
+Tests. World (4): the mailbox through the real Gmail sync, the calendar
+through the real calendar sync with a token on the second read, Salesforce
+through the real deal source, activity writer and opportunity writer with a
+task written, found by marker, read back and deleted, and a field updated in
+place; a draft landing, never sent; the token exchange. Reader (1): the
+explicit next step beats the earlier question. HTTP (2): demo mode connects
+both providers through our own callback and one sync fills the Inbox with
+judged items, drafts, a Salesforce proposal and an eligible routine; real
+mode still sends the browser to the provider. The other API tests now run
+against real-mode routes with their scripted transports, which is what they
+always were.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
+**246** (sync 67, worker 11, db 96, api 72) · build 5/5.
+
+**Phase 1: foundations and first value. Done (2026-09-21).**
+Monorepo, contracts, DB with RLS, real auth (WorkOS), Gmail per person and
+Salesforce per organization, the deterministic detector, the ranked list with a
+reason on every card, Gmail drafts (never send), the scheduled sweep, the
+Connections page.
+_Exit met:_ a team member logs in, connects two systems, and sees a real ranked
+list with zero configuration, kept current without a button.
+_Not yet done against real services:_ a live round trip with Google, Salesforce
+and WorkOS. Needs the three sets of credentials; needs no more code.
+
+**Phase 2: the agent (in progress).** The layer that makes it an agent rather
+than a reminder system. Each step ships behind the switch with the arithmetic
+as fallback, and each is tested in both modes.
+
+1. _Judgment._ ✅ Reads each candidate thread, decides owed / ask / urgency
+   behind a strict schema, stored per thread state. Deterministic rules with
+   no key; the model when configured.
+2. _Voice._ ✅ The model writes the draft from the stored thread and the
+   person's own writing (to this contact, past follow-ups, recent), behind
+   the switch, with the template composer as fallback. Grounding is enforced
+   in code. What the person then sends is matched to the draft and the edit
+   ratio recorded.
+3. _Calendar._ ✅ Google Calendar, read only, same sign-in, one more scope.
+   Meetings are stored and stamped on contacts, so "met them, sent nothing"
+   comes from a real meeting and a booked call cancels a chase; the agent
+   and the draft know what you met about.
+4. _The intent store._ ✅ Storage per person; capture from stated text, from
+   dismissals (with the reason), and from heavy rewrites of a draft;
+   retrieval by scope; enforcement by rule where a sentence is a rule; the
+   rest to the model as the person's own instructions; what was set aside
+   shown with the sentence that did it; a box to tell the agent and a list to
+   forget from. Still to come here: inferred entries held for confirmation,
+   and speech as a transcription step in front of the same box.
+5. _Pre-drafting._ ✅ The sweep drafts the top items the agent judged owed,
+   honouring the store, so the person opens the app and the drafts are there.
+   Still never sent.
+6. _Measurement._ ✅ Draft acceptance and edit distance, per person, on the
+   Inbox: "This week: N drafts, M sent, K as written."
+
+_Exit:_ the agent's draft is accepted or lightly edited more than half the
+time, measured; the deterministic list still passes every test with the agent
+off.
+
+**Phase 3: routines are found, proposed and run (next).** The general
+loop, on connector events first, so it needs no device software. Each step
+ships behind a switch with the current product as the fallback.
+
+1. _The event stream._ ✅ Every synced fact and every click in the product
+   becomes a `WorkflowEvent` in the person's store: source, app, event type,
+   record category, hashed identifiers, time. No body, no value. Backfilled
+   from what is already stored, then appended by every sweep. See the note.
+2. _Discovery._ ✅ `pattern-engine` over the stream per person: episodes,
+   clusters, candidates, scores, eligibility bars, plain-word steps. Runs in
+   the sweep. Deterministic; the model only names. Segmentation by case (the
+   contact) and days of quiet, not by minutes on a screen. See the note.
+3. _The proposal._ ✅ A card with the routine in plain words, the count, the
+   days, and the episodes as evidence. Accept, Not now, Never. Accepting
+   writes a confirmed intent entry; "Never" writes a stated one. See the note.
+4. _Compile and run._ ✅ The accepted candidate compiled to an `AgentSpec`,
+   shadow-run against the next real episodes and compared, then started into
+   supervised runs whose drafts and proposals go through the existing action
+   ladder, then "Always" where the org policy allows the risk. Receipts and
+   undo as today. See the note.
+5. _Capabilities as routines need them._ Stage move, send (behind a
+   per-person promotion and per-message approval until promoted), Slack,
+   HubSpot. Each is an adapter through the catalog with its risk and
+   reversibility, never a workflow.
+6. _Routine 1 through the same path._ The hand-found follow-up routine
+   expressed as a spec and run by the same runtime, so there is one path.
+   Its detector stays as the free trigger over every thread.
+
+_Exit:_ a person who never configured anything is offered a routine the
+agent found in their own connector events, accepts it, sees it shadow-run
+against what they did, approves it, and then it runs alone with a receipt
+and a one-click undo. The follow-up routine still passes every test with
+discovery off.
+
+**Phase 4: observation widens the stream.** The Chrome extension for
+LinkedIn and the long tail, then the macOS agent (accessibility API only, no
+network, CI-scanned), then Teach Mode with its UI in the same change, all
+emitting the same event contract into the same discovery. Self-observation
+suppression from the first commit. Admin: aggregates only, minimum cohort.
+_Exit:_ a person does a routine once in an app with no API, is offered it,
+approves it, and it runs.
+
+**Phase 5: earned autonomy.** Unattended allowlist, plan-shape binding, org
+policy gate, value-priced operational routines (the gifting anchor).
+
+**The demo is a slice of the final build, never a separate build.** Nothing is
+written for the demo that the final product would not keep. Where a piece is
+not ready, the switch is off and the fallback is what ships; there are no
+demo-only branches.
 
 ---
 
@@ -708,3 +1719,18 @@ so explicitly rather than working around it.
 17. Never send, delete, or write to a system of record without an approval bound
     to the exact diff.
 18. Never report a number without its provenance.
+
+**Standing rules from the owner (2026-09-21)**
+
+19. This is the final product. No demo-only shortcuts; anything not ready sits
+    behind a switch with a tested fallback.
+20. Every piece of the agent ships beside the deterministic path, and the
+    deterministic path stays tested with the agent off, so reverting is a
+    variable, never a rewrite.
+21. Plain language everywhere a person reads it: product copy, commit
+    messages, this plan. Short sentences. No em dashes.
+22. Do not commit. Report the files and what changed; the owner commits.
+23. **No more hand-written routines (2026-09-22).** The product finds the
+    routines each person has and runs them up the ladder. New work adds a
+    source, a capability, or discovery. The follow-up lane is routine 1 and
+    the demo; it is not the shape of what comes next.

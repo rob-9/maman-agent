@@ -108,7 +108,12 @@ export function registerConnectorRoutes(
       ...(challenge ? { pkce_challenge: challenge } : {}),
     });
     // The desktop opens this in the system browser. Tokens never touch it.
-    return { authorization_url: url, expires_in_seconds: 600 };
+    // Demo mode: no provider to consent at; land on our own callback instead.
+    const demoUrl = `${redirectUri}?code=demo&state=${encodeURIComponent(state)}`;
+    return {
+      authorization_url: env.CONNECTOR_MODE === "demo" ? demoUrl : url,
+      expires_in_seconds: 600,
+    };
   });
 
   app.get("/v1/connectors/:provider/callback", async (req, reply) => {

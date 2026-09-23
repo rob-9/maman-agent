@@ -389,6 +389,31 @@ export async function getAgentOwned(sql: Sql, ctx: TenantContext, agentId: strin
   });
 }
 
+/** Moves an agent the person owns to a new state. Null when it is not theirs. */
+export async function updateAgentStateOwned(
+  sql: Sql,
+  ctx: TenantContext,
+  agentId: string,
+  state:
+    "draft" | "shadow" | "supervised" | "active" | "paused" | "degraded" | "revoked" | "archived",
+) {
+  return withTenant(sql, ctx, async (tx) => {
+    if (!ctx.userId) return null;
+    const rows = await db(tx)
+      .update(schema.agents)
+      .set({ state, updated_at: new Date().toISOString() })
+      .where(
+        and(
+          eq(schema.agents.organization_id, ctx.organizationId),
+          eq(schema.agents.owner_user_id, ctx.userId),
+          eq(schema.agents.id, agentId),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  });
+}
+
 // ---------- policies ----------
 
 export type NewPolicyVersion = typeof schema.policy_versions.$inferInsert;

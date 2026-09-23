@@ -87,3 +87,20 @@ describe("capability catalog (v1)", () => {
     ]);
   });
 });
+
+describe("connector event tokens (the event stream)", () => {
+  it("a reply the person wrote maps to a draft, a reply that arrived to a read, a meeting to a read", () => {
+    expect(
+      capabilitiesForToken("google:email:record_updated:sender:sent_reply:email_thread"),
+    ).toEqual(["gmail.create_draft"]);
+    expect(
+      capabilitiesForToken("google:email:record_updated:recipient:received_reply:email_thread"),
+    ).toEqual(["gmail.get_thread_metadata"]);
+    expect(
+      capabilitiesForToken("google:calendar:record_updated:attendee:meeting_held:meeting"),
+    ).toEqual(["google_calendar.list_events"]);
+    expect(
+      capabilitiesForToken("salesforce:crm:record_updated:-:update_opportunity:opportunity"),
+    ).toContain("salesforce.propose_field_updates");
+  });
+});

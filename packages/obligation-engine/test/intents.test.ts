@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyIntentRules,
+  intentRuleSchema,
   parseIntentRule,
   predraftAllowed,
   promotionFor,
@@ -263,5 +264,79 @@ describe("a promotion", () => {
     expect(
       applyIntentRules([ob], rules, new Map([["c-sarah", contacts[0]!]]), new Map()).skipped,
     ).toEqual([]);
+  });
+});
+
+describe("a routine the person accepted or refused", () => {
+  const ob = (thread_id: string, contact: string, kind: Obligation["kind"]): Obligation => ({
+    thread_id,
+    contact_id: contact,
+    kind,
+    rank: 50,
+    reason: {
+      kind,
+      days_elapsed: 6,
+      threshold_days: 5,
+      last_direction: "outbound",
+      message_count: 2,
+      has_open_deal: null,
+    },
+  });
+
+  it("is a rule bound to the routine's signature, and never parsed from a sentence", () => {
+    const accepted = intentRuleSchema.safeParse({
+      kind: "routine_accepted",
+      signature: "a|b|c",
+      routine_id: "r1",
+      scope: { kind: "global" },
+    });
+    expect(accepted.success).toBe(true);
+    const never = intentRuleSchema.safeParse({
+      kind: "routine_never",
+      signature: "a|b|c",
+      scope: { kind: "global" },
+    });
+    expect(never.success).toBe(true);
+    expect(
+      intentRuleSchema.safeParse({ kind: "routine_accepted", scope: { kind: "global" } }).success,
+    ).toBe(false);
+    expect(
+      parseIntentRule("Do this for me when it comes up: Reply and update Salesforce.", contacts),
+    ).toBeNull();
+  });
+
+  it("neither sets a chase aside nor covers a write: they are about routines, nothing else", () => {
+    const rules = [
+      {
+        id: "i1",
+        rule: {
+          kind: "routine_accepted" as const,
+          signature: "a|b|c",
+          routine_id: "r1",
+          scope: { kind: "global" as const },
+        },
+      },
+      {
+        id: "i2",
+        rule: {
+          kind: "routine_never" as const,
+          signature: "x|y",
+          scope: { kind: "global" as const },
+        },
+      },
+    ];
+    const detected = [ob("t1", "c1", "awaiting_them"), ob("t2", "c1", "awaiting_you")];
+    const applied = applyIntentRules(detected, rules, new Map(), new Map());
+    expect(applied.kept.length).toBe(2);
+    expect(applied.skipped).toEqual([]);
+    expect(predraftAllowed(rules, undefined, "awaiting_you")).toBe(true);
+    expect(
+      promotionFor(
+        rules,
+        { kind: "salesforce.log_activity", shape_sha256: "s" },
+        undefined,
+        "awaiting_them",
+      ),
+    ).toBeUndefined();
   });
 });

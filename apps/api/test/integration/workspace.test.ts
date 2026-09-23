@@ -1,3 +1,4 @@
+import { createDemoWorld } from "@maman/connector-adapters";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { createHash } from "node:crypto";
@@ -60,7 +61,9 @@ const serverEnv: ServerEnv = {
   NODE_ENV: "test",
   AUTH_MODE: "dev",
   MODEL_PROVIDER: "demo",
-  CONNECTOR_MODE: "demo",
+  // Real connectors, scripted at the wire by the transports below; the demo
+  // world has its own describe at the end.
+  CONNECTOR_MODE: "real",
   DATABASE_URL: "postgres://localhost/x",
   REDIS_URL: "redis://localhost:6379",
   TEMPORAL_ADDRESS: "localhost:7233",
@@ -1062,5 +1065,164 @@ describe("the event stream over HTTP", () => {
     expect(sync.statusCode).toBe(200);
     expect(sync.json().events).toBeNull();
     await off.close();
+  });
+});
+
+describe("routines over HTTP", () => {
+  it("lists what discovery found for the person, takes their word on one, and shows a colleague none", async () => {
+    const sync = await app.inject({ method: "POST", url: "/v1/me/sync", headers: as(alice) });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json().discovery).not.toBeNull();
+    const list = await app.inject({ method: "GET", url: "/v1/me/routines", headers: as(alice) });
+    expect(list.statusCode).toBe(200);
+    const routines = list.json().routines as Array<Record<string, unknown>>;
+    for (const r of routines) {
+      expect(JSON.stringify(r)).not.toContain("@");
+      expect(Array.isArray(r["steps"])).toBe(true);
+    }
+    if (routines.length > 0) {
+      const id = routines[0]!["id"] as string;
+      const bad = await app.inject({
+        method: "POST",
+        url: `/v1/me/routines/${id}/decide`,
+        headers: as(alice),
+        payload: { decision: "maybe" },
+      });
+      expect(bad.statusCode).toBe(400);
+      const ok = await app.inject({
+        method: "POST",
+        url: `/v1/me/routines/${id}/decide`,
+        headers: as(alice),
+        payload: { decision: "dismissed" },
+      });
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json().routine.decision).toBe("dismissed");
+      // Accepting is for a routine that cleared every bar; a forming one is refused.
+      const forming = routines.find((r) => r["status"] === "candidate");
+      if (forming) {
+        const refused = await app.inject({
+          method: "POST",
+          url: `/v1/me/routines/${forming["id"]}/decide`,
+          headers: as(alice),
+          payload: { decision: "accepted" },
+        });
+        expect(refused.statusCode).toBe(409);
+        expect(refused.json().reason).toBe("not_eligible");
+      }
+      const theirs = await app.inject({
+        method: "POST",
+        url: `/v1/me/routines/${id}/decide`,
+        headers: as(bob),
+        payload: { decision: "accepted" },
+      });
+      expect(theirs.statusCode).toBe(404);
+    }
+    const none = await app.inject({ method: "GET", url: "/v1/me/routines", headers: as(bob) });
+    expect(none.json().routines).toEqual([]);
+    // Start is for an accepted routine whose shadow runs agreed; anything else is refused.
+    if (routines.length > 0) {
+      const start = await app.inject({
+        method: "POST",
+        url: `/v1/me/routines/${routines[0]!["id"]}/start`,
+        headers: as(alice),
+      });
+      expect(start.statusCode).toBe(409);
+      expect(start.json().reason).toBe("not_accepted");
+    }
+    const unknown = await app.inject({
+      method: "POST",
+      url: `/v1/me/routines/${uuidv7()}/start`,
+      headers: as(alice),
+    });
+    expect(unknown.statusCode).toBe(404);
+  });
+});
+
+describe("demo mode: the whole product on a machine with no credentials", () => {
+  const carol = uuidv7();
+  let demoApp: FastifyInstance;
+  beforeAll(async () => {
+    await globalCreateUser(client.sql, {
+      id: carol,
+      workos_user_id: `wu_${carol}`,
+      email: "carol@co.example",
+      display_name: "Carol",
+    });
+    await addMembership(client.sql, { organizationId: orgId }, { user_id: carol, role: "member" });
+    const world = createDemoWorld({ now: () => NOW });
+    demoApp = buildServer({
+      env: { ...serverEnv, CONNECTOR_MODE: "demo", AGENT_MODE: "assist" },
+      sql: client.sql,
+      connectorTransport: world.token,
+      gmailTransport: world.transport,
+      crmTransport: world.transport,
+      now: () => NOW,
+    });
+    await demoApp.ready();
+  });
+  afterAll(async () => {
+    await demoApp?.close();
+  });
+
+  it("'Connect Google' lands on our own callback with a demo code; the same exchange and storage run; the Inbox fills from the scripted mailbox", async () => {
+    const start = await demoApp.inject({
+      method: "POST",
+      url: "/v1/me/connections/gmail/authorize",
+      headers: as(carol),
+    });
+    expect(start.statusCode).toBe(200);
+    const url = new URL(start.json().authorization_url as string);
+    expect(url.pathname).toBe("/v1/me/connections/gmail/callback");
+    expect(url.searchParams.get("code")).toBe("demo");
+    const back = await demoApp.inject({ method: "GET", url: url.pathname + url.search });
+    expect(back.statusCode).toBe(303);
+    expect(back.headers.location).toContain("connected=1");
+
+    const org = await demoApp.inject({
+      method: "POST",
+      url: "/v1/connectors/salesforce/authorize",
+      headers: as(carol),
+    });
+    const orgUrl = new URL(org.json().authorization_url as string);
+    const orgBack = await demoApp.inject({ method: "GET", url: orgUrl.pathname + orgUrl.search });
+    expect(orgBack.statusCode).toBe(303);
+
+    const sync = await demoApp.inject({ method: "POST", url: "/v1/me/sync", headers: as(carol) });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json()).toMatchObject({ ok: true, listed: 8 });
+    expect(sync.json().agent.assessed).toBeGreaterThan(0);
+    expect(sync.json().opportunity.proposed).toBeGreaterThanOrEqual(1);
+    expect(sync.json().discovery.eligible).toBeGreaterThanOrEqual(1);
+
+    const list = await demoApp.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: as(carol),
+    });
+    const items = list.json().obligations as Array<Record<string, unknown>>;
+    expect(items.length).toBeGreaterThanOrEqual(3);
+    expect(items.some((o) => o["subject"] === "Re: Enterprise pricing" && o["draft"])).toBe(true);
+    const actions = (
+      await demoApp.inject({ method: "GET", url: "/v1/me/actions", headers: as(carol) })
+    ).json().actions as Array<Record<string, unknown>>;
+    expect(actions.some((a) => String(a["summary"]).includes("send over the MSA for legal"))).toBe(
+      true,
+    );
+    const routines = (
+      await demoApp.inject({ method: "GET", url: "/v1/me/routines", headers: as(carol) })
+    ).json().routines as Array<Record<string, unknown>>;
+    const found = routines.find((r) => r["status"] === "eligible")!;
+    expect(found["title"]).toBe("You write to them, they reply, you reply, you meet, they reply");
+  });
+
+  it("with real connectors the authorize URL goes to the provider, not to us", async () => {
+    const start = await app.inject({
+      method: "POST",
+      url: "/v1/me/connections/gmail/authorize",
+      headers: as(alice),
+    });
+    const url = new URL(start.json().authorization_url as string);
+    expect(url.hostname).not.toBe("localhost");
+    expect(url.searchParams.get("code")).toBeNull();
   });
 });

@@ -134,6 +134,32 @@ export function bareRoleNoun(role: string): string | null {
 }
 
 /** Observed phrase for one token, role-aware and honest about agency. */
+/**
+ * Steps from the event stream (a mailbox, a calendar, a CRM) name what
+ * happened in their semantic type; the event type only says a record moved.
+ * Said the way the person would say it.
+ */
+export const CONNECTOR_PHRASES: Record<string, string> = {
+  sent_new: "you write to them",
+  sent_reply: "you reply",
+  sent_chase: "you follow up again",
+  received_new: "they write to you",
+  received_reply: "they reply",
+  received_more: "they write again",
+  meeting_held: "you meet",
+  log_activity: "the email is logged in Salesforce",
+  update_opportunity: "the deal is updated in Salesforce",
+};
+
+/** Sources whose events come from the stream, not a screen. */
+const CONNECTOR_SOURCES = new Set(["google", "salesforce", "product"]);
+
+export function connectorPhrase(token: string): string | null {
+  const [source = "", , , , semantic = ""] = token.split(":");
+  if (!CONNECTOR_SOURCES.has(source)) return null;
+  return CONNECTOR_PHRASES[semantic] ?? null;
+}
+
 function observedPhrase(app: string, eventType: string, role: string, semantic: string): string {
   const noun = roleNoun(role);
   const withSemantic = (base: string): string =>
@@ -235,7 +261,7 @@ export function explainWorkflowSteps(sequence: string[]): WorkflowExplanation {
     const semantic = parts[4] ?? "-";
     steps.push({
       order: steps.length + 1,
-      observed: observedPhrase(app, eventType, role, semantic),
+      observed: connectorPhrase(token) ?? observedPhrase(app, eventType, role, semantic),
       app: APP_LABELS[app] ?? app,
       repeats: 1,
       automation: automationFor(token, eventType),

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { explain, nextMeetingLine, type ObligationView } from "../src/lib/explain.js";
+import {
+  explain,
+  formingLine,
+  nextMeetingLine,
+  routineEvidenceLine,
+  routineRunsLine,
+  type ObligationView,
+} from "../src/lib/explain.js";
 
 const o = (over: Partial<ObligationView> = {}): ObligationView => ({
   id: "1",
@@ -98,5 +105,71 @@ describe("meetings on the card", () => {
     );
     expect(nextMeetingLine(booked, new Date("2026-09-30T12:00:00Z"))).toBeNull();
     expect(nextMeetingLine(o())).toBeNull();
+  });
+});
+
+describe("a found routine, in one line", () => {
+  const ev = (names: Array<string | null>) => names.map((n) => ({ contact_display_name: n }));
+  it("says how often, on how many days, and around whom, by name only", () => {
+    expect(
+      routineEvidenceLine({
+        occurrence_count: 4,
+        distinct_day_count: 4,
+        evidence: ev(["Bob Ray", "Sarah Chen", "Bob Ray", "Dan Li"]),
+      }),
+    ).toBe("Seen 4 times on 4 days, around Bob Ray, Sarah Chen and Dan Li.");
+    expect(
+      routineEvidenceLine({
+        occurrence_count: 5,
+        distinct_day_count: 3,
+        evidence: ev(["A", "B", "C", "D", null]),
+      }),
+    ).toBe("Seen 5 times on 3 days, around A, B, C and 1 more.");
+    expect(
+      routineEvidenceLine({ occurrence_count: 1, distinct_day_count: 1, evidence: ev([null]) }),
+    ).toBe("Seen once on 1 day.");
+    expect(
+      routineEvidenceLine({
+        occurrence_count: 3,
+        distinct_day_count: 2,
+        evidence: ev(["Bob Ray"]),
+      }),
+    ).toBe("Seen 3 times on 2 days, around Bob Ray.");
+  });
+  it("a forming routine says what it still needs", () => {
+    expect(
+      formingLine({
+        why_not: ["not seen often enough yet", "not seen on enough different days yet"],
+      }),
+    ).toBe("not seen often enough yet; not seen on enough different days yet");
+    expect(formingLine({ why_not: [] })).toBe("still forming");
+  });
+});
+
+describe("how a routine has run, in one line", () => {
+  const base = {
+    mode: "shadow" as const,
+    shadow_completed: 0,
+    shadow_successful: 0,
+    required: 3,
+    ready_to_start: false,
+    supervised_completed: 0,
+  };
+  it("says what happened alongside the person and whether it can start", () => {
+    expect(routineRunsLine(base)).toBe(
+      "Accepted. It will run alongside you the next time this comes up.",
+    );
+    expect(routineRunsLine({ ...base, shadow_completed: 2, shadow_successful: 1 })).toBe(
+      "Ran alongside you 2 times, agreed once. Needs 3 that agree before it can start.",
+    );
+    expect(
+      routineRunsLine({ ...base, shadow_completed: 4, shadow_successful: 3, ready_to_start: true }),
+    ).toBe("Ran alongside you 4 times, agreed 3 times. Ready to start.");
+    expect(routineRunsLine({ ...base, mode: "supervised" })).toBe(
+      "Running. Its drafts and proposals will show up here for your approval.",
+    );
+    expect(routineRunsLine({ ...base, mode: "supervised", supervised_completed: 2 })).toBe(
+      "Running. Produced drafts or proposals 2 times, each for your approval.",
+    );
   });
 });

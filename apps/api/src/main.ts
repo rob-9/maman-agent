@@ -1,6 +1,7 @@
 import { Client, Connection } from "@temporalio/client";
 import { loadServerEnv } from "@maman/config";
 import { createDbClient } from "@maman/db";
+import { createDemoWorld } from "@maman/connector-adapters";
 import { buildServer } from "./server.js";
 import { TemporalRunOrchestrator } from "./orchestrator.js";
 
@@ -14,10 +15,21 @@ const temporalClient = new Client({
   connection: Connection.lazy({ address: env.TEMPORAL_ADDRESS }),
   namespace: env.TEMPORAL_NAMESPACE,
 });
+// With no credentials on this machine (CONNECTOR_MODE=demo), the connectors
+// are a scripted Gmail, Calendar and Salesforce in memory. Every path the
+// product runs is the real one; only the wire is scripted.
+const demo = env.CONNECTOR_MODE === "demo" ? createDemoWorld() : null;
 const app = buildServer({
   env,
   sql: db.sql,
   orchestrator: new TemporalRunOrchestrator(temporalClient.workflow),
+  ...(demo
+    ? {
+        connectorTransport: demo.token,
+        gmailTransport: demo.transport,
+        crmTransport: demo.transport,
+      }
+    : {}),
 });
 
 const url = new URL(env.API_BASE_URL);

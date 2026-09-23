@@ -265,6 +265,15 @@ export function capabilitiesForToken(token: string): string[] {
   ) {
     return ["browser.extract_structured_fields"];
   }
+  // CONNECTOR EVENTS (the event stream, derived from what a mailbox, a
+  // calendar and a CRM already hold). A thread updated by the person is a
+  // reply they wrote: the helper drafts it, never sends. A thread updated by
+  // the other side is something that arrived: the helper reads it. Without
+  // these, every mail step scored as an unmapped UI write and no routine
+  // from a mailbox could ever clear the feasibility bar.
+  if (appCategory === "email" && eventType === "record_updated") {
+    return targetRole === "sender" ? ["gmail.create_draft"] : ["gmail.get_thread_metadata"];
+  }
   const key = `${appCategory}/${eventType}`;
   const table: Record<string, string[]> = {
     "crm/record_opened": ["salesforce.get_record"],
@@ -289,6 +298,8 @@ export function capabilitiesForToken(token: string): string[] {
     "email/navigation": ["gmail.search_metadata"],
     "email/record_opened": ["gmail.get_thread_metadata"],
     "calendar/navigation": ["google_calendar.list_events"],
+    // A meeting that happened, from the event stream: the helper reads it.
+    "calendar/record_updated": ["google_calendar.list_events"],
     "browser/table_read": ["browser.extract_table"],
     "browser/record_opened": ["browser.extract_structured_fields"],
     // THE EVENT TYPES THE LIVE macOS OBSERVER ACTUALLY EMITS.

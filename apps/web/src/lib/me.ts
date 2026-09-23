@@ -96,6 +96,56 @@ export type ActionView = {
   can_promote: boolean;
 };
 
+/** A routine the agent found in what the person did. */
+export type RoutineView = {
+  id: string;
+  title: string;
+  summary: string;
+  status: "candidate" | "eligible";
+  decision: "dismissed" | "accepted" | "never" | null;
+  intent_id: string | null;
+  occurrence_count: number;
+  distinct_day_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  steps: Array<{
+    order: number;
+    observed: string;
+    app: string;
+    repeats: number;
+    automation: "automated" | "context" | "manual";
+    mode: "read" | "propose_write" | "write" | null;
+  }>;
+  evidence: Array<{
+    started_at: string;
+    ended_at: string;
+    contact_display_name: string | null;
+    events: number;
+  }>;
+  why_not: string[];
+  required_capabilities: string[];
+  agent_id: string | null;
+  plan: string[];
+  compile_problem: string | null;
+  runs: {
+    mode: "shadow" | "supervised" | null;
+    shadow_completed: number;
+    shadow_successful: number;
+    required: number;
+    ready_to_start: boolean;
+    latest_agreement: number | null;
+    supervised_completed: number;
+    recent: Array<{
+      triggered_at: string;
+      mode: "shadow" | "supervised";
+      status: "watching" | "completed" | "skipped" | "failed";
+      agreement: number | null;
+      missing_rules: string[];
+      case_ref: string | null;
+    }>;
+  } | null;
+};
+
 export type OrgConnectorView = {
   id: string;
   provider: string;
@@ -134,6 +184,11 @@ export const me = {
   declineAction: (id: string) => call<{ id: string }>("POST", `/v1/me/actions/${id}/decline`),
   revertAction: (id: string) => call<{ id: string }>("POST", `/v1/me/actions/${id}/revert`),
   alwaysAction: (id: string) => call<{ id: string }>("POST", `/v1/me/actions/${id}/always`),
+  routines: () => call<{ routines: RoutineView[] }>("GET", "/v1/me/routines"),
+  decideRoutine: (id: string, decision: "dismissed" | "never" | "accepted") =>
+    call<{ routine: RoutineView }>("POST", `/v1/me/routines/${id}/decide`, { decision }),
+  startRoutine: (id: string) =>
+    call<{ routine: RoutineView }>("POST", `/v1/me/routines/${id}/start`),
   stateIntent: (text: string) => call<{ intent: IntentView }>("POST", "/v1/me/intents", { text }),
   retireIntent: (id: string) => call<{ id: string }>("POST", `/v1/me/intents/${id}/retire`),
   connections: () => call<{ connections: ConnectionView[] }>("GET", "/v1/me/connections"),
@@ -167,4 +222,12 @@ export const me = {
     ),
 };
 
-export { draftsLine, explain, gmailDraftUrl, nextMeetingLine } from "./explain.js";
+export {
+  draftsLine,
+  explain,
+  formingLine,
+  gmailDraftUrl,
+  nextMeetingLine,
+  routineEvidenceLine,
+  routineRunsLine,
+} from "./explain.js";

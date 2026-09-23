@@ -20,6 +20,7 @@ import { createModelProvider, DeterministicModelProvider } from "@maman/model-pr
 import { deterministicContextComposer, modelComposer } from "@maman/voice-engine";
 import { createDbClient } from "@maman/db";
 import { createConnectorTokenTransport } from "@maman/connector-auth";
+import { createDemoWorld } from "@maman/connector-adapters";
 import { createActivities, type PersistenceSink } from "./activities.js";
 import {
   createSweepActivities,
@@ -128,11 +129,16 @@ const sink: PersistenceSink = {
   },
 };
 
+/** With no credentials on this machine, the scripted connectors (see the API). */
+const demo = env.CONNECTOR_MODE === "demo" ? createDemoWorld() : null;
+const tokenTransport = demo ? demo.token : createConnectorTokenTransport();
+const wire = demo ? demo.transport : fetchTransport;
+
 /** The organization's connectors, from the org vault. */
 const orgCredentials = createVaultCredentialProvider({
   sql,
   masterKey,
-  transport: createConnectorTokenTransport(),
+  transport: tokenTransport,
   clientCredentials: orgClientCredentials,
 });
 
@@ -141,7 +147,7 @@ function buildSweepActivities() {
   const credentials = createUserVaultCredentialProvider({
     sql,
     masterKey,
-    transport: createConnectorTokenTransport(),
+    transport: tokenTransport,
     clientCredentials: (provider) =>
       provider === "gmail" && env.GOOGLE_CLIENT_ID
         ? {
@@ -153,7 +159,7 @@ function buildSweepActivities() {
   return createSweepActivities({
     sql,
     credentials,
-    transport: fetchTransport,
+    transport: wire,
     now: () => new Date(),
     contentKey: masterKey,
     // The agent pass, only when switched on (AGENT_MODE=assist).
@@ -161,7 +167,7 @@ function buildSweepActivities() {
       ? {
           agent: {
             provider: createModelProvider(env),
-            content: gmailContentReader({ credentials, transport: fetchTransport }),
+            content: gmailContentReader({ credentials, transport: wire }),
           },
           // Drafts written before being asked, from the same job a click uses.
           predraft: {
@@ -176,25 +182,26 @@ function buildSweepActivities() {
     // Writes to the organization's CRM for what each person sent: proposed
     // always, applied without asking only under their own promotion.
     actions: {
-      writer: salesforceActivityWriter({ credentials: orgCredentials, transport: fetchTransport }),
+      writer: salesforceActivityWriter({ credentials: orgCredentials, transport: wire }),
       opportunities: salesforceOpportunityWriter({
         credentials: orgCredentials,
-        transport: fetchTransport,
+        transport: wire,
       }),
       orgPolicy: orgPolicyResolver(sql),
     },
     // The event stream, unless switched off.
     ...(env.EVENT_STREAM === "off" ? {} : { events: {} }),
+    ...(env.EVENT_STREAM === "off" || env.DISCOVERY === "off" ? {} : { discovery: {} }),
     // The organization's CRM (org vault), asked about each person's contacts.
     deals: resolveDealSource({
       sql,
       credentials: createVaultCredentialProvider({
         sql,
         masterKey,
-        transport: createConnectorTokenTransport(),
+        transport: tokenTransport,
         clientCredentials: orgClientCredentials,
       }),
-      transport: fetchTransport,
+      transport: wire,
     }),
   });
 }

@@ -71,6 +71,12 @@ export const serverEnvSchema = z
      * `off`: nothing is derived; the rest of the product is unchanged.
      */
     EVENT_STREAM: z.enum(["off", "on"]).optional(),
+    /**
+     * Discovery: the pattern engine over each person's stream, in the sweep,
+     * finding the routines they have. `on` (default). `off`: nothing is
+     * looked for; found routines already stored stay as they are.
+     */
+    DISCOVERY: z.enum(["off", "on"]).optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production") {

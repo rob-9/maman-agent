@@ -49,10 +49,22 @@ import {
   sentFromMatchedDrafts,
 } from "../../src/actions.js";
 import { runOpportunityPass } from "../../src/opportunity-pass.js";
-import { runEventStep } from "../../src/events.js";
-import { runPatternEngine, toPatternFeature } from "@maman/pattern-engine";
+import { deriveEvents, runEventStep } from "../../src/events.js";
+import { runDiscoveryStep } from "../../src/discovery.js";
+import { decideOnRoutine, routineViews, startRoutine } from "../../src/routines.js";
+import { runRoutines } from "../../src/routine-runs.js";
+import { routineAgentState } from "../../src/routine-agents.js";
+import { runPatternEngine, segmentByCase, toPatternFeature } from "@maman/pattern-engine";
 import { patternFeatureEventSchema } from "@maman/contracts";
-import { countWorkflowEvents, listWorkflowEvents, setObligationOutcome } from "@maman/db";
+import {
+  countWorkflowEvents,
+  listRoutineCandidates,
+  listWorkflowEvents,
+  recordWorkflowEvents,
+  upsertRoutineCandidates,
+  setObligationOutcome,
+  type EventFacts,
+} from "@maman/db";
 import { recordDraft, draftOutcomes } from "@maman/db";
 
 /**
@@ -1643,7 +1655,7 @@ describe("the event stream in the sweep", () => {
     expect(await countWorkflowEvents(client.sql, ctx)).toBe(before + 1);
   });
 
-  it("the stream is what discovery reads: every event projects to a feature; the engine's on-device defaults lose sparse connector events, a day-wide boundary keeps them", async () => {
+  it("the stream is what discovery reads: every event projects to a feature; the engine's on-device time segmenter loses sparse connector events, the case segmenter keeps them", async () => {
     const events = await listWorkflowEvents(client.sql, ctx);
     const features = events.map((e) => patternFeatureEventSchema.parse(toPatternFeature(e)));
     expect(features.length).toBe(events.length);
@@ -1653,20 +1665,515 @@ describe("the event stream in the sweep", () => {
     const defaults = runPatternEngine(features, { owner_user_id: alice, now: () => NOW });
     const covered = (r: typeof defaults) => r.episodes.reduce((n, e) => n + e.events.length, 0);
     expect(covered(defaults)).toBeLessThan(events.length);
-    // With boundaries fitted to connector cadence the same events group.
-    const day = 24 * 60 * 60 * 1000;
-    const fitted = runPatternEngine(features, {
-      owner_user_id: alice,
-      now: () => NOW,
-      segmentation: { event_gap_boundary_ms: day, inactivity_boundary_ms: day },
-    });
-    expect(fitted.episodes.length).toBeGreaterThan(0);
-    expect(covered(fitted)).toBeGreaterThanOrEqual(covered(defaults));
+    // Grouped by the contact they are about, the same events form episodes.
+    const byCase = segmentByCase(features.filter((f) => f.source !== "product"));
+    expect(byCase.length).toBeGreaterThan(0);
+    for (const e of byCase) expect(new Set(e.events.map((x) => x.case_ref)).size).toBe(1);
   });
 
   it("a colleague's stream is empty", async () => {
     expect(await listWorkflowEvents(client.sql, { organizationId: orgId, userId: bob })).toEqual(
       [],
     );
+  });
+});
+
+describe("discovery: the routines the stream shows", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  const ideps = () => ({ sql: client.sql, contentKey: master, now: () => NOW });
+  /** A run of one routine around one contact: their reply arrives, Alice replies, the deal is updated. */
+  function run(contact: string, day: string, n: number): EventFacts {
+    const t = (h: number) => `${day}T${String(9 + h).padStart(2, "0")}:00:00.000Z`;
+    return {
+      messages: [
+        {
+          message_external_id: `r${n}-in`,
+          thread_external_id: `rt${n}`,
+          direction: "inbound",
+          sent_at: t(0),
+          position: 2,
+          previous_direction: "outbound",
+          contact_address: contact,
+        },
+        {
+          message_external_id: `r${n}-out`,
+          thread_external_id: `rt${n}`,
+          direction: "outbound",
+          sent_at: t(1),
+          position: 3,
+          previous_direction: "inbound",
+          contact_address: contact,
+        },
+      ],
+      meetings: [],
+      actions: [
+        {
+          id: `0192b3c4-0000-7000-8000-0000000000${String(n).padStart(2, "0")}`,
+          kind: "salesforce.update_opportunity",
+          status: "verified",
+          approved_by: "user",
+          approved_at: t(2),
+          verified_at: t(2),
+          reverted_at: null,
+          field_names: ["next_step"],
+          contact_address: contact,
+        },
+      ],
+      decisions: [],
+      intents: [],
+    };
+  }
+  const RUNS = [
+    run("bob@client.com", "2026-09-02", 1),
+    run("sarah@acme.com", "2026-09-04", 2),
+    run("bob@client.com", "2026-09-09", 3),
+    run("dan@client.com", "2026-09-12", 4),
+  ];
+
+  it("finds a routine repeated around different contacts on different days, names it, and says it is eligible", async () => {
+    for (const facts of RUNS) {
+      const r = await recordWorkflowEvents(client.sql, ctx, deriveEvents(ctx, facts, NOW));
+      expect(r.refused).toBeNull();
+    }
+    const result = await runDiscoveryStep({ sql: client.sql, now: () => NOW }, ctx);
+    expect(result.eligible).toBeGreaterThanOrEqual(1);
+    const views = await routineViews(client.sql, ctx);
+    const found = views.find((v) => v.status === "eligible")!;
+    expect(found).toBeDefined();
+    // Bob's second run lands inside his real stream from the sweeps above and
+    // forms a longer episode, so three of the four runs cluster as this shape.
+    expect(found.occurrence_count).toBeGreaterThanOrEqual(3);
+    expect(found.distinct_day_count).toBeGreaterThanOrEqual(3);
+    expect(found.why_not).toEqual([]);
+    expect(found.steps.map((s) => s.app)).toEqual(["Gmail", "Gmail", "Salesforce"]);
+    expect(found.steps.map((s) => s.automation)).toEqual(["automated", "automated", "automated"]);
+    expect(found.required_capabilities).toContain("gmail.create_draft");
+    expect(found.required_capabilities).toContain("salesforce.propose_field_updates");
+    expect(found.title.length).toBeGreaterThan(0);
+    // No subject or body anywhere in what the person is shown; the routine
+    // itself names no one. (The evidence names their own contacts, as the
+    // cards do, by the name the mailbox gave, which can be an address.)
+    expect(JSON.stringify(views.map((v) => ({ ...v, evidence: [] })))).not.toContain("@");
+    // The person's clicks on proposals are not steps of the routine.
+    expect(JSON.stringify(found.steps)).not.toContain("approve");
+  });
+
+  it("the evidence names the contacts each run was around, and only by name", async () => {
+    const found = (await routineViews(client.sql, ctx)).find((v) => v.status === "eligible")!;
+    expect(found.evidence.length).toBe(found.occurrence_count);
+    const names = found.evidence.map((e) => e.contact_display_name);
+    expect(
+      names.some((n) => n === "Sarah Chen" || n === "bob@client.com" || n === "dan@client.com"),
+    ).toBe(true);
+    for (const e of found.evidence) {
+      expect(e.started_at <= e.ended_at).toBe(true);
+      expect(e.events).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("'not now' holds the routine back for the cooldown and says so, then it is offered again", async () => {
+    const before = (await listRoutineCandidates(client.sql, ctx)).find(
+      (r) => r.status === "eligible",
+    )!;
+    const said = await decideOnRoutine(ideps(), ctx, before.id, "dismissed");
+    expect(said.ok && said.routine.decision).toBe("dismissed");
+    await runDiscoveryStep({ sql: client.sql, now: () => NOW }, ctx);
+    const held = (await routineViews(client.sql, ctx)).find((v) => v.id === before.id)!;
+    expect(held.status).toBe("candidate");
+    expect(held.decision).toBe("dismissed");
+    expect(held.why_not).toEqual(["you said not now"]);
+    // Past the cooldown it is offered again.
+    const later = new Date(NOW.getTime() + 15 * 86_400_000);
+    await runDiscoveryStep({ sql: client.sql, now: () => later }, ctx);
+    const again = (await routineViews(client.sql, ctx, later)).find((v) => v.id === before.id)!;
+    expect(again.status).toBe("eligible");
+    expect(again.decision).toBeNull();
+  });
+
+  it("'never' is a sentence in the intent store; forgetting it there is what offers the routine again", async () => {
+    const before = (await listRoutineCandidates(client.sql, ctx)).find(
+      (r) => r.status === "eligible",
+    )!;
+    const later = new Date(NOW.getTime() + 15 * 86_400_000);
+    const said = await decideOnRoutine({ ...ideps(), now: () => later }, ctx, before.id, "never");
+    expect(said.ok && said.routine.decision).toBe("never");
+    const entry = (await listIntentViews(ideps(), ctx)).find((v) =>
+      v.text.startsWith("Never offer to take this over:"),
+    )!;
+    expect(entry).toBeDefined();
+    expect(entry.is_rule).toBe(true);
+    await runDiscoveryStep({ sql: client.sql, now: () => later }, ctx);
+    const never = (await routineViews(client.sql, ctx, later)).find((v) => v.id === before.id)!;
+    expect(never.status).toBe("candidate");
+    expect(never.decision).toBe("never");
+    expect(never.intent_id).toBe(entry.id);
+    expect(never.why_not).toEqual(["you said never"]);
+    const { forgetIntent } = await import("../../src/intents.js");
+    await forgetIntent(ideps(), ctx, entry.id);
+    await runDiscoveryStep({ sql: client.sql, now: () => later }, ctx);
+    const back = (await routineViews(client.sql, ctx, later)).find((v) => v.id === before.id)!;
+    expect(back.status).toBe("eligible");
+    expect(back.decision).toBeNull();
+  });
+
+  it("'accept' is a confirmed entry in the person's words, bound to the routine; a routine still forming cannot be accepted", async () => {
+    const eligible = (await listRoutineCandidates(client.sql, ctx)).find(
+      (r) => r.status === "eligible",
+    )!;
+    const said = await decideOnRoutine(ideps(), ctx, eligible.id, "accepted");
+    expect(said.ok).toBe(true);
+    if (!said.ok) return;
+    expect(said.routine.decision).toBe("accepted");
+    const entry = (await listIntentViews(ideps(), ctx)).find(
+      (v) => v.id === said.routine.intent_id,
+    )!;
+    expect(entry.text).toBe(`Do this for me when it comes up: ${eligible.title}.`);
+    expect(entry.source).toBe("inferred");
+    const rule = (
+      await intentsFor(ideps(), ctx, {
+        contact_address: "nobody@x",
+        account_name: null,
+        kind: "awaiting_you",
+      })
+    ).length;
+    expect(rule).toBeGreaterThanOrEqual(0);
+    // A forming routine, however the request arrived, is refused.
+    const formingId = uuidv7();
+    await upsertRoutineCandidates(
+      client.sql,
+      ctx,
+      [
+        {
+          id: formingId,
+          signature: "forming|x|y",
+          status: "candidate",
+          title: "Something seen twice",
+          summary: "Not yet.",
+          occurrence_count: 2,
+          distinct_day_count: 2,
+          first_seen_at: NOW.toISOString(),
+          last_seen_at: NOW.toISOString(),
+          candidate: { canonical_sequence: ["a", "b", "c"] },
+          naming: {},
+          verdict: { failed: [{ bar: "occurrences" }] },
+          evidence: [],
+        },
+      ],
+      NOW,
+    );
+    expect(await decideOnRoutine(ideps(), ctx, formingId, "accepted")).toEqual({
+      ok: false,
+      reason: "not_eligible",
+    });
+    expect(await decideOnRoutine(ideps(), ctx, uuidv7(), "accepted")).toEqual({
+      ok: false,
+      reason: "not_found",
+    });
+  });
+
+  it("runs in the sweep after the stream, and not with discovery off", async () => {
+    const off = await runGmailSyncJob({ ...deps(), events: {} }, ctx);
+    expect(off.ok && off.discovery).toBeNull();
+    const on = await runGmailSyncJob({ ...deps(), events: {}, discovery: {} }, ctx);
+    expect(on.ok).toBe(true);
+    if (!on.ok) return;
+    expect(on.discovery).toMatchObject({ candidates: expect.any(Number) });
+    expect(on.discovery!.events).toBeGreaterThan(0);
+  });
+
+  it("a colleague has no routines", async () => {
+    expect(await routineViews(client.sql, { organizationId: orgId, userId: bob })).toEqual([]);
+  });
+});
+
+describe("an accepted routine runs", () => {
+  const ctx = { organizationId: orgId, userId: alice };
+  const real = Date.now();
+  const at = (offsetMs: number) => new Date(real + offsetMs).toISOString();
+  const laterClock = () => new Date(real + 4 * 86_400_000);
+
+  /** One run of the routine around a contact, dated after the acceptance. */
+  function run(contact: string, offsetMs: number, n: number): EventFacts {
+    return {
+      messages: [
+        {
+          message_external_id: `s${n}-in`,
+          thread_external_id: `st${n}`,
+          direction: "inbound",
+          sent_at: at(offsetMs),
+          position: 2,
+          previous_direction: "outbound",
+          contact_address: contact,
+        },
+        {
+          message_external_id: `s${n}-out`,
+          thread_external_id: `st${n}`,
+          direction: "outbound",
+          sent_at: at(offsetMs + 3_600_000),
+          position: 3,
+          previous_direction: "inbound",
+          contact_address: contact,
+        },
+      ],
+      meetings: [],
+      actions: [
+        {
+          id: `0192b3c4-0000-7000-8000-0000000000e${n}`,
+          kind: "salesforce.update_opportunity",
+          status: "verified",
+          approved_by: "user",
+          approved_at: at(offsetMs + 7_200_000),
+          verified_at: at(offsetMs + 7_200_000),
+          reverted_at: null,
+          field_names: ["next_step"],
+          contact_address: contact,
+        },
+      ],
+      decisions: [],
+      intents: [],
+    };
+  }
+
+  it("accepting compiled it: an agent in shadow, with a plain-language plan, linked to the routine", async () => {
+    const accepted = (await routineViews(client.sql, ctx)).find((v) => v.decision === "accepted")!;
+    expect(accepted).toBeDefined();
+    expect(accepted.agent_id).not.toBeNull();
+    expect(accepted.compile_problem).toBeNull();
+    expect(accepted.plan.length).toBeGreaterThan(0);
+    expect(await routineAgentState(client.sql, ctx, accepted.agent_id!)).toBe("shadow");
+    expect(accepted.runs).toMatchObject({
+      mode: "shadow",
+      shadow_completed: 0,
+      ready_to_start: false,
+    });
+    // Not ready: start is refused.
+    expect(await startRoutine(client.sql, ctx, accepted.id, laterClock())).toEqual({
+      ok: false,
+      reason: "not_ready",
+    });
+  });
+
+  it("each new trigger after acceptance is one shadow run, never two; a closed episode is compared, and three that agree make it ready", async () => {
+    const accepted = (await routineViews(client.sql, ctx)).find((v) => v.decision === "accepted")!;
+    // Two runs the person completed: reply, then the deal updated, on two contacts.
+    for (const [i, contact] of ["bob@client.com", "sarah@acme.com"].entries()) {
+      const r = await recordWorkflowEvents(
+        client.sql,
+        ctx,
+        deriveEvents(ctx, run(contact, (i + 1) * 3_600_000, i + 1), laterClock()),
+      );
+      expect(r.refused).toBeNull();
+    }
+    const first = await runRoutines({ sql: client.sql, now: laterClock, contentKey: master }, ctx);
+    expect(first).toMatchObject({ routines: 1, runs_created: 2, shadow_completed: 2 });
+    const again = await runRoutines({ sql: client.sql, now: laterClock, contentKey: master }, ctx);
+    expect(again).toMatchObject({ runs_created: 0, shadow_completed: 0 });
+    let view = (await routineViews(client.sql, ctx, laterClock())).find(
+      (v) => v.id === accepted.id,
+    )!;
+    expect(view.runs).toMatchObject({
+      shadow_completed: 2,
+      shadow_successful: 2,
+      ready_to_start: false,
+      latest_agreement: 1,
+    });
+    expect(view.runs!.recent[0]).toMatchObject({
+      mode: "shadow",
+      status: "completed",
+      agreement: 1,
+      missing_rules: [],
+    });
+    // A third run where the person replied but did not touch the deal: partial agreement, with the gap named.
+    const partial = run("dan@client.com", 3 * 3_600_000, 3);
+    partial.actions = [];
+    await recordWorkflowEvents(client.sql, ctx, deriveEvents(ctx, partial, laterClock()));
+    const third = await runRoutines({ sql: client.sql, now: laterClock, contentKey: master }, ctx);
+    expect(third).toMatchObject({ runs_created: 1, shadow_completed: 1 });
+    view = (await routineViews(client.sql, ctx, laterClock())).find((v) => v.id === accepted.id)!;
+    const dan = view.runs!.recent.find((r) => r.agreement !== null && r.agreement < 1)!;
+    expect(dan.agreement).toBe(0.5);
+    expect(dan.missing_rules.join(" ")).toContain("salesforce.propose_field_updates");
+    expect(view.runs).toMatchObject({
+      shadow_completed: 3,
+      shadow_successful: 2,
+      ready_to_start: false,
+    });
+    // A fourth full run makes three that agree.
+    await recordWorkflowEvents(
+      client.sql,
+      ctx,
+      deriveEvents(ctx, run("bob@client.com", 5 * 3_600_000, 4), laterClock()),
+    );
+    await runRoutines({ sql: client.sql, now: laterClock, contentKey: master }, ctx);
+    view = (await routineViews(client.sql, ctx, laterClock())).find((v) => v.id === accepted.id)!;
+    expect(view.runs).toMatchObject({
+      shadow_completed: 4,
+      shadow_successful: 3,
+      ready_to_start: true,
+    });
+  });
+
+  it("start moves it to supervised; in the sweep a new trigger then produces a draft and a CRM proposal through the existing jobs, each for approval", async () => {
+    const accepted = (await routineViews(client.sql, ctx, laterClock())).find(
+      (v) => v.decision === "accepted",
+    )!;
+    const started = await startRoutine(client.sql, ctx, accepted.id, laterClock());
+    expect(started.ok && started.routine.runs?.mode).toBe("supervised");
+    expect(await routineAgentState(client.sql, ctx, accepted.agent_id!)).toBe("supervised");
+    expect(await startRoutine(client.sql, ctx, accepted.id, laterClock())).toEqual({
+      ok: false,
+      reason: "not_ready",
+    });
+
+    // Sarah replies on the thread Alice wrote on, after the acceptance, with the next step in it.
+    MAILBOX["owed"] = {
+      id: "owed",
+      historyId: "h-owed-supervised",
+      messages: [
+        gmailThread(
+          "owed",
+          "alice@co.example",
+          "Sarah Chen <sarah@acme.com>",
+          String(real - 86_400_000),
+          "Enterprise pricing",
+          "Here is the proposal.",
+        ).messages[0],
+        {
+          ...gmailThread(
+            "owed",
+            "Sarah Chen <sarah@acme.com>",
+            "alice@co.example",
+            String(real + 60_000),
+            "Re: Enterprise pricing",
+            "Thanks. Next step: send over the MSA for legal. We'd like to sign by end of quarter.",
+          ).messages[0],
+          id: "owed-m2",
+        },
+      ],
+    };
+    CALENDAR = { items: [], nextSyncToken: "cal-tok-sup" };
+    const posts: HttpRequest[] = [];
+    const draftingTransport = async (req: HttpRequest): Promise<HttpResponse> => {
+      if (req.method === "POST" && req.url.endsWith("/drafts")) {
+        posts.push(req);
+        return {
+          status: 200,
+          headers: {},
+          body: { id: `sd-${posts.length}`, message: { id: `sm-${posts.length}` } },
+        };
+      }
+      return transport(req);
+    };
+    const opp = {
+      Id: "006DEAL",
+      Name: "Client Co renewal",
+      StageName: "Proposal",
+      NextStep: null as string | null,
+      CloseDate: "2026-12-31",
+      IsClosed: false,
+    };
+    const sfTransport = async (req: HttpRequest): Promise<HttpResponse> => {
+      const url = new URL(req.url);
+      const q = url.searchParams.get("q") ?? "";
+      if (q.includes("FROM Contact"))
+        return {
+          status: 200,
+          headers: {},
+          body: { records: [{ Id: "003SARAH", AccountId: "001X" }] },
+        };
+      if (q.includes("FROM OpportunityContactRole"))
+        return { status: 200, headers: {}, body: { records: [{ OpportunityId: "006DEAL" }] } };
+      if (url.pathname.endsWith("/sobjects/Opportunity/006DEAL") && req.method === "GET")
+        return { status: 200, headers: {}, body: opp };
+      return { status: 404, headers: {}, body: {} };
+    };
+    const orgCreds: CredentialProvider = {
+      load: async () => ({ access_token: "sf-tok", instance_url: "https://na1.example.com" }),
+      refresh: async () => ({ access_token: "sf-tok", instance_url: "https://na1.example.com" }),
+    };
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`UPDATE contacts SET has_open_deal = true WHERE external_id = 'sarah@acme.com'`,
+    );
+    const result = await runGmailSyncJob(
+      {
+        ...deps(),
+        now: laterClock,
+        transport: draftingTransport,
+        agent: { provider: new DeterministicModelProvider() },
+        predraft: {
+          composer: deterministicContextComposer(new DeterministicModelProvider()),
+          max: 0,
+        },
+        actions: {
+          writer: salesforceActivityWriter({ credentials: orgCreds, transport: sfTransport }),
+          opportunities: salesforceOpportunityWriter({
+            credentials: orgCreds,
+            transport: sfTransport,
+          }),
+          orgPolicy: async () => DEFAULT_ORG_POLICY,
+        },
+        events: {},
+        discovery: {},
+      },
+      ctx,
+      { detection: { awaiting_you_days: 1 } },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.routines).toMatchObject({ runs_created: 1, supervised_completed: 1, skipped: 0 });
+    // The draft went to Gmail, never sent; the CRM change is a proposal, not a write.
+    expect(posts.length).toBe(1);
+    expect(opp.NextStep).toBeNull();
+    const proposals = await listActionViews(
+      {
+        sql: client.sql,
+        contentKey: master,
+        writer: salesforceActivityWriter({ credentials: orgCreds, transport: sfTransport }),
+        opportunities: salesforceOpportunityWriter({
+          credentials: orgCreds,
+          transport: sfTransport,
+        }),
+        orgPolicy: async () => DEFAULT_ORG_POLICY,
+        now: laterClock,
+      },
+      ctx,
+    );
+    expect(
+      proposals.some(
+        (a) =>
+          a.kind === "salesforce.update_opportunity" &&
+          a.status === "proposed" &&
+          a.summary.includes("send over the MSA"),
+      ),
+    ).toBe(true);
+    const view = (await routineViews(client.sql, ctx, laterClock())).find(
+      (v) => v.id === accepted.id,
+    )!;
+    expect(
+      JSON.stringify({ decision: view.decision, agent: view.agent_id, runs: view.runs }),
+    ).toContain("supervised");
+    expect(view.runs).toMatchObject({ mode: "supervised", supervised_completed: 1 });
+    // Recent runs are newest-trigger first; the shadow runs above were dated later.
+    expect(view.runs!.recent.find((r) => r.mode === "supervised")).toMatchObject({
+      status: "completed",
+    });
+    // The same trigger does not run twice.
+    const second = await runRoutines({ sql: client.sql, now: laterClock, contentKey: master }, ctx);
+    expect(second).toMatchObject({ runs_created: 0 });
+    expect(posts.length).toBe(1);
+  });
+
+  it("a colleague has no runs and cannot start it", async () => {
+    const accepted = (await routineViews(client.sql, ctx)).find((v) => v.decision === "accepted")!;
+    expect(
+      await startRoutine(
+        client.sql,
+        { organizationId: orgId, userId: bob },
+        accepted.id,
+        laterClock(),
+      ),
+    ).toEqual({ ok: false, reason: "not_found" });
   });
 });

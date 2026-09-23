@@ -50,6 +50,19 @@ export const patternFeatureEventSchema = z
     trace_ref: uuid.optional(),
     /** Which step of that trace this event corresponds to. */
     trace_step_order: z.number().int().positive().optional(),
+    /**
+     * The case this event belongs to: an opaque, salted one-way hash of the
+     * party the event is about (a contact, for connector events). Events that
+     * share a case are the same piece of work spread over hours or days,
+     * which is how a mailbox and a CRM look, unlike a screen. Discovery
+     * groups by it; nothing about it identifies anyone off the device or
+     * outside the organization that salted it. Absent for events with no
+     * party, which the case segmenter then leaves alone.
+     */
+    case_ref: z
+      .string()
+      .regex(/^[0-9a-f]{32}$/)
+      .optional(),
   })
   .strict();
 

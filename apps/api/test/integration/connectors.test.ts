@@ -36,7 +36,7 @@ const env: ServerEnv = {
   NODE_ENV: "test",
   AUTH_MODE: "dev",
   MODEL_PROVIDER: "demo",
-  CONNECTOR_MODE: "demo",
+  CONNECTOR_MODE: "real",
   DATABASE_URL: "postgres://localhost:5432/x",
   REDIS_URL: "redis://localhost:6379",
   TEMPORAL_ADDRESS: "localhost:7233",

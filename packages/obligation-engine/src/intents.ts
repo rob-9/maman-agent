@@ -48,6 +48,27 @@ export const intentRuleSchema = z.discriminatedUnion("kind", [
       scope: intentScopeSchema,
     })
     .strict(),
+  /**
+   * A routine the agent found and the person accepted: "do this for me".
+   * Bound to the routine's signature (its step sequence), so it covers that
+   * shape and no other. Forgetting the entry withdraws the acceptance.
+   */
+  z
+    .object({
+      kind: z.literal("routine_accepted"),
+      signature: z.string().min(1),
+      routine_id: z.string().min(1),
+      scope: intentScopeSchema,
+    })
+    .strict(),
+  /** "Never offer this routine." Forgetting the entry lets it be offered again. */
+  z
+    .object({
+      kind: z.literal("routine_never"),
+      signature: z.string().min(1),
+      scope: intentScopeSchema,
+    })
+    .strict(),
 ]);
 export type IntentRule = z.infer<typeof intentRuleSchema>;
 
@@ -190,7 +211,7 @@ export function applyIntentRules(
     const contact = contactsById.get(o.contact_id);
     const chases = threadsById.get(o.thread_id)?.chase_count ?? 0;
     const hit = rules.find(({ rule }) => {
-      if (rule.kind === "no_predraft" || rule.kind === "auto_action") return false;
+      if (rule.kind !== "no_chase" && rule.kind !== "max_chases") return false;
       if (!inScope(rule.scope, contact, o.kind)) return false;
       if (rule.kind === "no_chase") return true;
       return chases >= rule.max;

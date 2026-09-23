@@ -205,22 +205,23 @@ function sentences(text: string): string[] {
 export function readOpportunityDeterministically(input: OpportunityInput): OpportunityOutput {
   const last = input.messages[input.messages.length - 1]!;
   const out: OpportunityOutput = { next_step: null, close_date: null };
-  for (const s of sentences(last.text)) {
-    if (!out.next_step) {
-      for (const re of NEXT_STEP_PATTERNS) {
-        const m = re.exec(s);
-        if (m) {
-          const value = (m[2] ? `${m[1]} ${m[2]}` : m[1]!)
-            .trim()
-            .replace(/[,;]$/, "")
-            .slice(0, 255);
-          if (value.length >= 6 && norm(value) !== norm(input.current.next_step ?? "")) {
-            out.next_step = { value, quote: s.slice(0, 400) };
-          }
-          break;
-        }
+  // The patterns are in order of how plainly they state a next step: "next
+  // step: X" beats "I'll send X" beats "can you confirm X". The plainest
+  // sentence anywhere in the message wins, not the first sentence that
+  // matches anything.
+  const lines = sentences(last.text);
+  outer: for (const re of NEXT_STEP_PATTERNS) {
+    for (const s of lines) {
+      const m = re.exec(s);
+      if (!m) continue;
+      const value = (m[2] ? `${m[1]} ${m[2]}` : m[1]!).trim().replace(/[,;]$/, "").slice(0, 255);
+      if (value.length >= 6 && norm(value) !== norm(input.current.next_step ?? "")) {
+        out.next_step = { value, quote: s.slice(0, 400) };
+        break outer;
       }
     }
+  }
+  for (const s of lines) {
     if (!out.close_date) {
       for (const re of CLOSE_PATTERNS) {
         if (re.test(s)) {

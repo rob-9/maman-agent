@@ -1,5 +1,14 @@
 import Link from "next/link";
-import { draftsLine, explain, gmailDraftUrl, me, nextMeetingLine } from "@/lib/me";
+import {
+  draftsLine,
+  explain,
+  formingLine,
+  gmailDraftUrl,
+  me,
+  nextMeetingLine,
+  routineEvidenceLine,
+  routineRunsLine,
+} from "@/lib/me";
 import {
   alwaysActionAction,
   approveActionAction,
@@ -13,6 +22,8 @@ import {
   snoozeAction,
   stateIntentAction,
   syncAction,
+  decideRoutineAction,
+  startRoutineAction,
 } from "@/lib/actions";
 
 export const dynamic = "force-dynamic";
@@ -24,11 +35,12 @@ const KIND_LABEL = {
 } as const;
 
 export default async function InboxPage() {
-  const [obligations, connections, intents, actions] = await Promise.all([
+  const [obligations, connections, intents, actions, routines] = await Promise.all([
     me.obligations(),
     me.connections(),
     me.intents(),
     me.actions(),
+    me.routines(),
   ]);
 
   if (!connections.ok || !obligations.ok) {
@@ -68,6 +80,11 @@ export default async function InboxPage() {
   const proposals = crm.filter((a) => a.status === "proposed");
   const done = crm.filter((a) => a.status !== "proposed" && a.status !== "declined").slice(0, 8);
   const ready = items.filter((o) => o.draft !== null).length;
+  const found = routines.ok ? routines.data.routines : [];
+  const offered = found.filter((r) => r.status === "eligible" && r.decision !== "never");
+  const forming = found.filter(
+    (r) => r.status === "candidate" && r.decision === null && r.why_not.length > 0,
+  );
   return (
     <>
       <div className="row">
@@ -250,6 +267,95 @@ export default async function InboxPage() {
                     </button>
                   </form>
                 ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {offered.length > 0 || forming.length > 0 ? (
+        <section className="section">
+          <div className="section-head">
+            <h2>Routines</h2>
+            <p className="muted">
+              Things you do the same way, again and again, that your agent noticed in your own mail,
+              calendar and Salesforce. Accept one and it will first run alongside you, showing what
+              it would have done, before it does anything.
+            </p>
+          </div>
+          <ul className="quiet-list">
+            {offered.map((r) => (
+              <li key={r.id} className="proposal">
+                <div className="proposal-main">
+                  <span className="name">{r.title}</span>
+                  <span className="fine">{routineEvidenceLine(r)}</span>
+                  <ol className="steps">
+                    {r.steps.map((s) => (
+                      <li key={s.order}>
+                        {s.observed} in {s.app}
+                        {s.repeats > 1 ? ` (${s.repeats} times)` : ""}
+                        <span className="fine">
+                          {s.automation === "automated" && s.mode === "read"
+                            ? " · the agent would notice this"
+                            : s.automation === "automated"
+                              ? " · the agent would do this, with your approval"
+                              : s.automation === "context"
+                                ? " · context"
+                                : " · stays with you"}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                  {r.decision === "accepted" ? (
+                    <span className="pill ready">
+                      {r.runs ? routineRunsLine(r.runs) : "Accepted."}
+                      {r.compile_problem ? ` Not compiled: ${r.compile_problem}.` : ""}
+                    </span>
+                  ) : r.decision === "dismissed" ? (
+                    <span className="pill">You said not now.</span>
+                  ) : null}
+                </div>
+                {r.decision === null ? (
+                  <div className="proposal-actions">
+                    <form action={decideRoutineAction.bind(null, r.id, "accepted")}>
+                      <button className="button" type="submit">
+                        Accept
+                      </button>
+                    </form>
+                    <form action={decideRoutineAction.bind(null, r.id, "dismissed")}>
+                      <button className="button secondary" type="submit">
+                        Not now
+                      </button>
+                    </form>
+                    <form action={decideRoutineAction.bind(null, r.id, "never")}>
+                      <button className="button quiet" type="submit">
+                        Never
+                      </button>
+                    </form>
+                  </div>
+                ) : r.intent_id ? (
+                  <div className="proposal-actions">
+                    {r.runs?.ready_to_start ? (
+                      <form action={startRoutineAction.bind(null, r.id)}>
+                        <button className="button" type="submit">
+                          Start
+                        </button>
+                      </form>
+                    ) : null}
+                    <form action={forgetIntentAction.bind(null, r.intent_id)}>
+                      <button className="link" type="submit">
+                        Undo
+                      </button>
+                    </form>
+                  </div>
+                ) : null}
+              </li>
+            ))}
+            {forming.map((r) => (
+              <li key={r.id}>
+                <span className="status none">Forming</span>
+                <span> {r.title}</span>
+                <span className="fine"> {formingLine(r)}</span>
               </li>
             ))}
           </ul>
