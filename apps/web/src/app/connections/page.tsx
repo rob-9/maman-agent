@@ -21,10 +21,13 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
   return (
     <>
       <div className="page-head">
-        <h1>Connections</h1>
-        <p className="muted">
-          What Maman can read, and on whose behalf. Tokens are encrypted and never shown here.
-        </p>
+        <div>
+          <h1>Connections</h1>
+          <p className="lede">
+            What your agent can read, and on whose behalf. Tokens are encrypted and never shown
+            here.
+          </p>
+        </div>
       </div>
 
       {notice ? (
@@ -45,13 +48,13 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
           action={
             gmail && gmail.status === "active" ? (
               <form action={syncAction}>
-                <button className="button secondary" type="submit">
+                <button className="btn ghost" type="submit">
                   Check now
                 </button>
               </form>
             ) : (
               <form action={connectAction.bind(null, "gmail")}>
-                <button className="button" type="submit">
+                <button className="btn" type="submit">
                   {gmail ? "Reconnect Google" : "Connect Google"}
                 </button>
               </form>
@@ -72,13 +75,13 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
           action={
             salesforce && salesforce.status === "connected" ? (
               <form action={disconnectOrgAction.bind(null, "salesforce")}>
-                <button className="button quiet" type="submit">
+                <button className="btn ghost" type="submit">
                   Disconnect
                 </button>
               </form>
             ) : (
               <form action={connectOrgAction.bind(null, "salesforce")}>
-                <button className="button" type="submit">
+                <button className="btn" type="submit">
                   {salesforce ? "Reconnect Salesforce" : "Connect Salesforce"}
                 </button>
               </form>
@@ -102,8 +105,10 @@ function Section({
   return (
     <section className="section">
       <div className="section-head">
-        <h2>{title}</h2>
-        <p className="muted">{blurb}</p>
+        <div>
+          <h2>{title}</h2>
+          <p>{blurb}</p>
+        </div>
       </div>
       <div className="stack">{children}</div>
     </section>
