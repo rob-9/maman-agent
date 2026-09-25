@@ -39,6 +39,7 @@ export {
   activeRules,
   forgetIntent,
   intentsFor,
+  keepIntent,
   listIntentViews,
   skippedWithReasons,
   stateIntent,
@@ -122,3 +123,9 @@ export {
   type RoutineRunResult,
   type RoutineRunSummary,
 } from "./routine-runs.js";
+export {
+  runInference,
+  INFERENCE_WINDOW_DAYS,
+  type InferenceDeps,
+  type InferenceResult,
+} from "./inference.js";

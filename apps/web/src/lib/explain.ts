@@ -169,3 +169,57 @@ export function routineRunsLine(runs: {
     ? `${base} Ready to start.`
     : `${base} Needs ${runs.required} that agree before it can start.`;
 }
+
+/** "SC" for Sarah Chen; "B" for bob@client.com. */
+export function initials(name: string): string {
+  const clean = name.replace(/<[^>]*>/g, "").trim();
+  if (clean.includes("@")) return clean.charAt(0).toUpperCase();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  return parts
+    .slice(0, 2)
+    .map((p) => p.charAt(0).toUpperCase())
+    .join("");
+}
+
+/** "Sep 30, 2026" for an ISO date; anything else comes back as it was. */
+export function longDate(iso: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(iso)) return iso;
+  const d = new Date(`${iso.slice(0, 10)}T12:00:00Z`);
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/** "Checked 3 minutes ago", from the mailbox connection's last sync. */
+export function checkedLine(
+  connections: ReadonlyArray<{ provider: string; last_synced_at: string | null }>,
+  now: Date = new Date(),
+): string | null {
+  const gmail = connections.find((c) => c.provider === "gmail");
+  if (!gmail?.last_synced_at) return null;
+  const ms = now.getTime() - Date.parse(gmail.last_synced_at);
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  if (minutes < 1) return "Checked just now";
+  if (minutes < 60) return `Checked ${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `Checked ${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+  const days = Math.round(hours / 24);
+  return `Checked ${days} ${days === 1 ? "day" : "days"} ago`;
+}
+
+/** What the agent would do for one step of a routine, in the person's words. */
+export function stepLine(s: {
+  app: string;
+  automation: "automated" | "context" | "manual";
+  mode: "read" | "propose_write" | "write" | null;
+}): string {
+  if (s.automation === "context") return "just context";
+  if (s.automation === "manual") return "stays with you";
+  if (s.mode === "read") return `your agent notices this in ${s.app}`;
+  if (s.app === "Gmail") return "your agent drafts it, you send";
+  if (s.app === "Salesforce") return "your agent proposes it, you approve";
+  return "your agent does it, you approve";
+}

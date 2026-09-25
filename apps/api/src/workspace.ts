@@ -56,6 +56,7 @@ import {
   routineViews,
   decideOnRoutine,
   startRoutine,
+  keepIntent,
 } from "@maman/sync";
 import { createModelProvider } from "@maman/model-provider";
 import {
@@ -457,6 +458,17 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
       body.data.text,
     );
     return { intent };
+  });
+
+  /** The person keeps something the agent inferred. Only a proposed entry can be kept. */
+  app.post("/v1/me/intents/:id/keep", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const id = (req.params as { id: string }).id;
+    const ok = await keepIntent({ sql: deps.sql, contentKey: master }, userCtx(principal), id);
+    if (!ok) return reply.status(404).send({ status: 404, title: "Not Found" });
+    return { id, status: "active" };
   });
 
   app.post("/v1/me/intents/:id/retire", { schema: { tags: ["me"] } }, async (req, reply) => {

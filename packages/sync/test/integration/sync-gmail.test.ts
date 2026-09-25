@@ -28,7 +28,15 @@ import { runGmailSyncJob } from "../../src/sync-gmail.js";
 import { decryptBody, encryptBody, storedThreadContent } from "../../src/content.js";
 import { voiceFor } from "../../src/voice.js";
 import { meetingContext } from "../../src/meetings.js";
-import { intentsFor, listIntentViews, skippedWithReasons, stateIntent } from "../../src/intents.js";
+import {
+  activeRules,
+  intentsFor,
+  keepIntent,
+  listIntentViews,
+  skippedWithReasons,
+  stateIntent,
+} from "../../src/intents.js";
+import { applyIntentRules } from "@maman/obligation-engine";
 import { DeterministicModelProvider } from "@maman/model-provider";
 import { deterministicContextComposer } from "@maman/voice-engine";
 import {
@@ -50,6 +58,7 @@ import {
 } from "../../src/actions.js";
 import { runOpportunityPass } from "../../src/opportunity-pass.js";
 import { deriveEvents, runEventStep } from "../../src/events.js";
+import { runInference } from "../../src/inference.js";
 import { runDiscoveryStep } from "../../src/discovery.js";
 import { decideOnRoutine, routineViews, startRoutine } from "../../src/routines.js";
 import { runRoutines } from "../../src/routine-runs.js";
@@ -60,9 +69,12 @@ import {
   countWorkflowEvents,
   listRoutineCandidates,
   listWorkflowEvents,
+  loadDetectionInputs,
   recordWorkflowEvents,
-  upsertRoutineCandidates,
+  replacePendingObligations,
   setObligationOutcome,
+  upsertRoutineCandidates,
+  upsertSyncedThreads,
   type EventFacts,
 } from "@maman/db";
 import { recordDraft, draftOutcomes } from "@maman/db";
@@ -2175,5 +2187,156 @@ describe("an accepted routine runs", () => {
         laterClock(),
       ),
     ).toEqual({ ok: false, reason: "not_found" });
+  });
+});
+
+describe("what the agent infers from decisions, held until kept", () => {
+  const carol = uuidv7();
+  const ctx = { organizationId: orgId, userId: carol };
+  const ideps = () => ({ sql: client.sql, contentKey: master, now: () => NOW });
+  const iso = (ms: string) => new Date(Number(ms)).toISOString();
+  let connId = "";
+
+  it("two follow-ups set aside with one person become a proposal, in words, with the evidence; not a rule yet", async () => {
+    await seedUser(carol, "carol@co.example");
+    connId = await linkGmail(carol, "carol@co.example");
+    await upsertSyncedThreads(client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        {
+          external_id: "c1",
+          subject: "Renewal",
+          last_message_at: iso(ago(6)),
+          last_direction: "outbound",
+          message_count: 1,
+          contact: { address: "bob@client.com", display_name: "Bob Ray" },
+        },
+        {
+          external_id: "c2",
+          subject: "Pricing",
+          last_message_at: iso(ago(7)),
+          last_direction: "outbound",
+          message_count: 1,
+          contact: { address: "bob@client.com", display_name: "Bob Ray" },
+        },
+        {
+          external_id: "c3",
+          subject: "Intro",
+          last_message_at: iso(ago(6)),
+          last_direction: "outbound",
+          message_count: 1,
+          contact: { address: "dan@client.com", display_name: "Dan Li" },
+        },
+      ],
+    });
+    const { threads, contacts } = await loadDetectionInputs(client.sql, ctx);
+    const detected = threads.map((t) => ({
+      thread_id: t.thread_id,
+      contact_id: t.contact_id,
+      kind: "awaiting_them" as const,
+      rank: 30,
+      reason: {
+        kind: "awaiting_them",
+        days_elapsed: t.subject === "Pricing" ? 7 : 6,
+        threshold_days: 5,
+        last_direction: "outbound",
+        message_count: 1,
+        has_open_deal: null,
+      },
+    }));
+    await replacePendingObligations(client.sql, ctx, detected, NOW);
+    const bobId = contacts.find((c) => c.address === "bob@client.com")!.contact_id;
+    const pending = (await listPendingObligations(client.sql, ctx, 10, { agent: false })).filter(
+      (o) => o.contact_id === bobId,
+    );
+    expect(pending.length).toBe(2);
+    for (const o of pending)
+      expect(await setObligationOutcome(client.sql, ctx, o.id, "dismissed")).toBe(true);
+
+    const r = await runInference(ideps(), ctx);
+    expect(r).toEqual({ decisions: 2, proposed: 1 });
+    const views = await listIntentViews(ideps(), ctx);
+    const guess = views.find((v) => v.status === "proposed")!;
+    expect(guess.text).toBe("Don't chase Bob Ray.");
+    expect(guess.evidence).toBe("You set aside 2 follow-ups with Bob Ray.");
+    expect(guess.source).toBe("inferred");
+    // Not a rule until kept: nothing is set aside by it.
+    expect((await activeRules(client.sql, ctx)).some((x) => x.rule.kind === "no_chase")).toBe(
+      false,
+    );
+    // Proposed once. A second pass proposes nothing new.
+    expect(await runInference(ideps(), ctx)).toEqual({ decisions: 2, proposed: 0 });
+  });
+
+  it("kept, it is a rule the next sweep enforces; declined, it is never proposed again", async () => {
+    const guess = (await listIntentViews(ideps(), ctx)).find((v) => v.status === "proposed")!;
+    expect(await keepIntent(ideps(), ctx, guess.id)).toBe(true);
+    expect((await activeRules(client.sql, ctx)).some((x) => x.rule.kind === "no_chase")).toBe(true);
+    const kept = (await listIntentViews(ideps(), ctx)).find((v) => v.id === guess.id)!;
+    expect(kept.status).toBe("active");
+    // Bob writes again on a new thread; the detector finds it; the kept rule sets it aside.
+    await upsertSyncedThreads(client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        {
+          external_id: "c4",
+          subject: "Q4",
+          last_message_at: iso(ago(6)),
+          last_direction: "outbound",
+          message_count: 1,
+          contact: { address: "bob@client.com", display_name: "Bob Ray" },
+        },
+      ],
+    });
+    const { threads, contacts } = await loadDetectionInputs(client.sql, ctx);
+    const t4 = threads.find((t) => t.subject === "Q4")!;
+    const rules = await activeRules(client.sql, ctx);
+    const applied = applyIntentRules(
+      [
+        {
+          thread_id: t4.thread_id,
+          contact_id: t4.contact_id,
+          kind: "awaiting_them",
+          rank: 30,
+          reason: {
+            kind: "awaiting_them",
+            days_elapsed: 6,
+            threshold_days: 5,
+            last_direction: "outbound",
+            message_count: 1,
+            has_open_deal: null,
+          },
+        },
+      ],
+      rules,
+      new Map(
+        contacts.map((c) => [
+          c.contact_id,
+          {
+            address: c.address,
+            display_name: c.display_name,
+            account_name: c.account_name ?? null,
+          },
+        ]),
+      ),
+      new Map(threads.map((t) => [t.thread_id, t])),
+    );
+    expect(applied.skipped.length).toBe(1);
+    expect(applied.skipped[0]!.intent_id).toBe(guess.id);
+
+    // Three young dismissals across people propose a waiting rule; declining it ends it.
+    const danThread = threads.find((t) => t.subject === "Intro")!;
+    const pendingDan = (await listPendingObligations(client.sql, ctx, 10, { agent: false })).find(
+      (o) => o.thread_id === danThread.thread_id,
+    )!;
+    await setObligationOutcome(client.sql, ctx, pendingDan.id, "dismissed");
+    const second = await runInference(ideps(), ctx);
+    expect(second.proposed).toBe(1);
+    const wait = (await listIntentViews(ideps(), ctx)).find((v) => v.status === "proposed")!;
+    expect(wait.text).toBe("Wait 8 days before chasing.");
+    const { forgetIntent } = await import("../../src/intents.js");
+    expect(await forgetIntent(ideps(), ctx, wait.id)).toBe(true);
+    expect((await listIntentViews(ideps(), ctx)).some((v) => v.status === "proposed")).toBe(false);
+    expect(await runInference(ideps(), ctx)).toEqual({ decisions: 3, proposed: 0 });
   });
 });

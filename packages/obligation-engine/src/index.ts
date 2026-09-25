@@ -30,3 +30,12 @@ export {
   type IntentRuleRecord,
   type IntentScope,
 } from "./intents.js";
+export {
+  inferIntents,
+  CONTACT_DISMISSALS,
+  ACCOUNT_DISMISSALS,
+  YOUNG_DISMISSALS,
+  MAX_WAIT_DAYS,
+  type Decision,
+  type InferredIntent,
+} from "./infer.js";

@@ -27,6 +27,7 @@ import { runPredraft, type PredraftResult } from "./predraft.js";
 import { autoActions, sentFromMatchedDrafts, type ActionDeps } from "./actions.js";
 import { runOpportunityPass, type OpportunityPassResult } from "./opportunity-pass.js";
 import { runEventStep, type EventStepResult } from "./events.js";
+import { runInference, type InferenceResult } from "./inference.js";
 import { runDiscoveryStep, type DiscoveryOptions, type DiscoveryResult } from "./discovery.js";
 import { ensureRoutineAgents } from "./routine-agents.js";
 import { runRoutines, type RoutineRunResult } from "./routine-runs.js";
@@ -119,6 +120,7 @@ export type GmailSyncJobResult =
       predraft: PredraftResult | null;
       actions: { proposed: number; auto_applied: number; auto_failed: number } | null;
       opportunity: OpportunityPassResult | null;
+      inference: InferenceResult | null;
       events: EventStepResult | null;
       discovery: DiscoveryResult | null;
       routines: RoutineRunResult | null;
@@ -279,6 +281,13 @@ export async function runGmailSyncJob(
         )
       : null;
 
+  // What the person's decisions say about how they work, proposed for them
+  // to keep or decline. Never a rule until kept.
+  const inference = await runInference(
+    { sql: deps.sql, contentKey: deps.contentKey, now: deps.now },
+    ctx,
+  ).catch(() => null);
+
   // What happened, as events, last: this sweep's own writes and decisions
   // are facts too. A refused batch is reported, never thrown; the stream is
   // an input to discovery, not a step the mailbox depends on.
@@ -352,6 +361,7 @@ export async function runGmailSyncJob(
     predraft,
     actions,
     opportunity,
+    inference,
     events,
     discovery,
     routines,

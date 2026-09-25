@@ -11,7 +11,7 @@ export const metadata = {
 };
 
 const NAV = [
-  ["Inbox", "/"],
+  ["Follow-ups", "/"],
   ["Connections", "/connections"],
 ] as const;
 

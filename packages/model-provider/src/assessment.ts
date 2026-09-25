@@ -142,8 +142,8 @@ export function assessDeterministically(input: AssessmentInput): AssessmentOutpu
       owed: true,
       ask,
       summary: ask
-        ? `${who} asked: "${ask.slice(0, 120)}" ${late} days ago and has no answer${money}.`
-        : `${who} wrote ${late} days ago and is still waiting on you${money}.`,
+        ? `${who} asked: "${ask.slice(0, 120)}" and has had no answer${money}.`
+        : `${who} wrote to you and is still waiting on a reply${money}.`,
       urgency,
       confidence: ask ? 0.8 : 0.6,
     };
@@ -185,7 +185,7 @@ export function assessDeterministically(input: AssessmentInput): AssessmentOutpu
   return {
     owed: true,
     ask: "",
-    summary: `You wrote ${who} ${late} days ago about "${input.subject.slice(0, 80)}" and heard nothing back${money}.`,
+    summary: `You wrote to ${who} about "${input.subject.slice(0, 80)}" and heard nothing back${money}.`,
     urgency: input.has_open_deal === true && late >= 7 ? "high" : "normal",
     confidence: 0.6,
   };

@@ -1,4 +1,5 @@
 import { createDemoWorld } from "@maman/connector-adapters";
+import { encryptBody } from "@maman/sync";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { createHash } from "node:crypto";
@@ -1027,6 +1028,11 @@ describe("the agent acts over HTTP: what the thread says about the deal", () => 
       "Next step: send the signed order form.",
       "Let's close by end of quarter.",
     ]);
+    expect(update["changes"]).toEqual([
+      { field: "next_step", from: null, to: "send the signed order form" },
+      { field: "close_date", from: "2026-12-31", to: "2026-09-30" },
+    ]);
+    expect(update["record"]).toBe("Client Co renewal");
   });
 });
 
@@ -1224,5 +1230,42 @@ describe("demo mode: the whole product on a machine with no credentials", () => 
     const url = new URL(start.json().authorization_url as string);
     expect(url.hostname).not.toBe("localhost");
     expect(url.searchParams.get("code")).toBeNull();
+  });
+});
+
+describe("what the agent inferred, over HTTP", () => {
+  it("a proposed entry can be kept once; an active one cannot be 'kept'; the list says which is which", async () => {
+    await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`
+      INSERT INTO intents (id, organization_id, owner_user_id, text_ciphertext, text_chars, source, status, scope_kind, scope_value, rule, origin)
+      VALUES (${uuidv7()}, ${orgId}, ${alice}, ${encryptBody("Don't chase Bob.", master, { organizationId: orgId, userId: alice })}, 16, 'inferred', 'proposed', 'contact', 'bob@client.com',
+              ${JSON.stringify({ kind: "no_chase", scope: { kind: "contact", value: "bob@client.com" } })}::jsonb,
+              ${JSON.stringify({ evidence: "You set aside 2 follow-ups with Bob." })}::jsonb)
+    `,
+    );
+    const list = await app.inject({ method: "GET", url: "/v1/me/intents", headers: as(alice) });
+    const intents = list.json().intents as Array<Record<string, unknown>>;
+    const guess = intents.find((i) => i["status"] === "proposed")!;
+    expect(guess["evidence"]).toBe("You set aside 2 follow-ups with Bob.");
+    const keep = await app.inject({
+      method: "POST",
+      url: `/v1/me/intents/${guess["id"]}/keep`,
+      headers: as(alice),
+    });
+    expect(keep.statusCode).toBe(200);
+    const again = await app.inject({
+      method: "POST",
+      url: `/v1/me/intents/${guess["id"]}/keep`,
+      headers: as(alice),
+    });
+    expect(again.statusCode).toBe(404);
+    const theirs = await app.inject({
+      method: "POST",
+      url: `/v1/me/intents/${guess["id"]}/keep`,
+      headers: as(bob),
+    });
+    expect(theirs.statusCode).toBe(404);
   });
 });

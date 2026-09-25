@@ -1,13 +1,17 @@
 import Link from "next/link";
 import {
+  checkedLine,
   draftsLine,
   explain,
   formingLine,
   gmailDraftUrl,
+  initials,
+  longDate,
   me,
   nextMeetingLine,
   routineEvidenceLine,
   routineRunsLine,
+  stepLine,
 } from "@/lib/me";
 import {
   alwaysActionAction,
@@ -24,14 +28,22 @@ import {
   syncAction,
   decideRoutineAction,
   startRoutineAction,
+  keepIntentAction,
 } from "@/lib/actions";
 
 export const dynamic = "force-dynamic";
 
 const KIND_LABEL = {
-  awaiting_you: "Owed a reply",
-  unsent_followup: "No follow-up",
-  awaiting_them: "Gone quiet",
+  awaiting_you: "They're waiting on you",
+  unsent_followup: "Met, nothing sent",
+  awaiting_them: "No reply yet",
+} as const;
+
+const FIELD_LABEL = {
+  next_step: "Next step",
+  close_date: "Close date",
+  subject: "Email",
+  date: "Date",
 } as const;
 
 function daysWord(n: number): string {
@@ -65,10 +77,10 @@ export default async function InboxPage() {
   if (connections.data.connections.length === 0) {
     return (
       <div className="card empty">
-        <h3>Nothing to read yet</h3>
+        <h3>Connect your Google account to start</h3>
         <p>
-          Connect your Google account and your agent will read your mail and calendar, find the
-          people you are about to drop, and write the first draft. Nothing to set up.
+          Your agent reads your mail and calendar, finds the people waiting on you, and writes the
+          first draft. There is nothing to set up.
         </p>
         <Link className="btn" href="/connections">
           Connect Google
@@ -80,7 +92,9 @@ export default async function InboxPage() {
   const items = obligations.data.obligations;
   const skipped = obligations.data.skipped;
   const agentMode = obligations.data.agent_mode;
-  const known = intents.ok ? intents.data.intents : [];
+  const allIntents = intents.ok ? intents.data.intents : [];
+  const known = allIntents.filter((k) => k.status === "active");
+  const guesses = allIntents.filter((k) => k.status === "proposed");
   const week = draftsLine(obligations.data.drafts_this_week);
   const crm = actions.ok ? actions.data.actions : [];
   const proposals = crm.filter((a) => a.status === "proposed");
@@ -95,14 +109,17 @@ export default async function InboxPage() {
 
   const lede =
     items.length === 0
-      ? "Nothing pending. You're caught up."
-      : `${items.length} ${items.length === 1 ? "person" : "people"} to get back to, most urgent first.`;
+      ? "Nobody is waiting on you right now."
+      : items.length === 1
+        ? "One person is waiting on you."
+        : `${items.length} people are waiting on you. Most urgent first.`;
+  const checked = checkedLine(connections.data.connections);
 
   return (
     <>
       <div className="page-head">
         <div>
-          <h1>Who you&apos;re about to drop</h1>
+          <h1>Follow-ups</h1>
           <p className="lede">{lede}</p>
         </div>
         <div className="aside">
@@ -111,6 +128,7 @@ export default async function InboxPage() {
               Check now
             </button>
           </form>
+          {checked ? <span className="fine">{checked}</span> : null}
         </div>
       </div>
 
@@ -151,8 +169,13 @@ export default async function InboxPage() {
           return (
             <article className={`card item k-${o.kind}`} key={o.id}>
               <div className="item-head">
-                <h3>{why.headline}</h3>
-                <span className="when">{daysWord(o.reason.days_elapsed)}</span>
+                <span className="avatar" aria-hidden="true">
+                  {initials(o.contact_display_name)}
+                </span>
+                <div className="item-title">
+                  <h3>{why.headline}</h3>
+                  <span className="when">{daysWord(o.reason.days_elapsed)}</span>
+                </div>
               </div>
               <div className="tags">
                 <span className={`tag ${o.kind}`}>{KIND_LABEL[o.kind]}</span>
@@ -168,7 +191,7 @@ export default async function InboxPage() {
               <p className="body">{why.detail}</p>
               {why.ask && !why.detail.includes(why.ask) ? (
                 <div className="ask">
-                  <span className="label">Waiting on</span>
+                  <span className="label">They asked</span>
                   <span className="text">{why.ask}</span>
                 </div>
               ) : null}
@@ -181,7 +204,7 @@ export default async function InboxPage() {
                 {o.reason.open_deal_value !== undefined ? (
                   <span className="money">${o.reason.open_deal_value.toLocaleString()} open</span>
                 ) : o.reason.has_open_deal === null ? (
-                  <span>deal unknown</span>
+                  <span>no deal on record</span>
                 ) : null}
                 {meeting ? <span>{meeting}</span> : null}
               </div>
@@ -221,7 +244,7 @@ export default async function InboxPage() {
                     <span className="btn ghost">Not needed</span>
                   </summary>
                   <form action={dismissAction.bind(null, o.id)} className="panel">
-                    <p>Say why, if you like. Your agent keeps it as something you told it.</p>
+                    <p>Say why if you like. Your agent remembers it.</p>
                     <input
                       className="input"
                       name="note"
@@ -243,8 +266,7 @@ export default async function InboxPage() {
 
       {items.length > 0 ? (
         <p className="footnote">
-          A draft lands in your Gmail Drafts folder. Nothing is sent until you open it and press
-          Send.
+          Drafts go to your Gmail Drafts folder. Nothing is sent until you open one and press Send.
         </p>
       ) : null}
 
@@ -254,8 +276,8 @@ export default async function InboxPage() {
             <div>
               <h2>Salesforce</h2>
               <p>
-                What your agent would record for the team. Nothing is written until you approve it,
-                and every write is read back before it counts. You can undo any one.
+                Changes your agent wants to make. Nothing changes until you approve it. Every change
+                is checked after it is made, and you can undo it.
               </p>
             </div>
             {proposals.length > 0 ? (
@@ -267,8 +289,27 @@ export default async function InboxPage() {
           <div className="stack">
             {proposals.map((a) => (
               <div key={a.id} className="card proposal">
-                <span className="title">{a.summary}</span>
-                <span className="detail">{a.detail}</span>
+                <span className="title">
+                  {a.kind === "salesforce.update_opportunity"
+                    ? `Update the deal "${a.record}"`
+                    : `Log an email to ${a.contact_display_name}'s record`}
+                </span>
+                <span className="detail">
+                  {a.kind === "salesforce.update_opportunity"
+                    ? `From what ${a.contact_display_name} wrote.`
+                    : "From an email you sent."}
+                </span>
+                <dl className="diff">
+                  {a.changes.map((c) => (
+                    <div key={c.field} className="diff-row">
+                      <dt>{FIELD_LABEL[c.field]}</dt>
+                      <dd>
+                        {c.from ? <s>{longDate(c.from)}</s> : null}
+                        <span className="to">{longDate(c.to)}</span>
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
                 {a.quotes.length > 0 ? (
                   <div className="quotes">
                     {a.quotes.map((q) => (
@@ -307,13 +348,13 @@ export default async function InboxPage() {
                       className={`status ${a.status === "verified" ? "ok" : a.status === "reverted" ? "none" : a.status === "failed" || a.status === "stale" ? "bad" : "warn"}`}
                     >
                       {a.status === "verified"
-                        ? "Written, verified"
+                        ? "Done, checked"
                         : a.status === "reverted"
                           ? "Undone"
                           : a.status === "failed"
                             ? "Not written"
                             : a.status === "stale"
-                              ? "Changed since you saw it"
+                              ? "Skipped, it changed since you looked"
                               : a.status}
                     </span>
                     <span>{a.summary}</span>
@@ -339,9 +380,9 @@ export default async function InboxPage() {
             <div>
               <h2>Routines</h2>
               <p>
-                Things you do the same way, again and again, that your agent noticed in your own
-                mail, calendar and Salesforce. Accept one and it first runs alongside you, showing
-                what it would have done, before it does anything.
+                Patterns your agent has noticed in how you work. Accept one and it watches a few
+                more times, showing you what it would have done. It does nothing on its own until
+                you tell it to start.
               </p>
             </div>
           </div>
@@ -362,15 +403,7 @@ export default async function InboxPage() {
                             {s.observed}
                             {s.repeats > 1 ? ` (×${s.repeats})` : ""}
                           </span>
-                          <span className="how">
-                            {s.automation === "automated" && s.mode === "read"
-                              ? `noticed in ${s.app}`
-                              : s.automation === "automated"
-                                ? `agent does this, you approve`
-                                : s.automation === "context"
-                                  ? "context"
-                                  : "stays with you"}
-                          </span>
+                          <span className="how">{stepLine(s)}</span>
                         </span>
                       </li>
                     );
@@ -382,7 +415,9 @@ export default async function InboxPage() {
                     {r.compile_problem ? ` Not compiled: ${r.compile_problem}.` : ""}
                   </span>
                 ) : r.decision === "dismissed" ? (
-                  <span className="state quiet">You said not now. It will ask again later.</span>
+                  <span className="state quiet">
+                    You said not now. It will come back in two weeks.
+                  </span>
                 ) : null}
                 {r.decision === null ? (
                   <div className="actions">
@@ -439,8 +474,10 @@ export default async function InboxPage() {
         <section className="section">
           <div className="section-head">
             <div>
-              <h2>Set aside by what you said</h2>
-              <p>These matched something you told your agent. Forget the note to bring one back.</p>
+              <h2>Set aside</h2>
+              <p>
+                Skipped because of something you told your agent. Forget the note to bring one back.
+              </p>
             </div>
           </div>
           <ul className="rows">
@@ -463,16 +500,46 @@ export default async function InboxPage() {
             <p>
               In your own words. &ldquo;Don&apos;t chase Acme.&rdquo; &ldquo;Never follow up more
               than twice.&rdquo; &ldquo;After a demo, send a recap the same day.&rdquo; Rules are
-              enforced; the rest guides the writing.
+              always followed. Everything else shapes how it writes.
             </p>
           </div>
         </div>
+        {guesses.length > 0 ? (
+          <div className="card guesses">
+            <div className="guesses-head">
+              <span className="title">Your agent thinks</span>
+              <span className="fine">From what you did. Nothing applies until you keep it.</span>
+            </div>
+            <ul className="rows plain">
+              {guesses.map((g) => (
+                <li key={g.id}>
+                  <span>
+                    <b>{g.text}</b>
+                    {g.evidence ? <span className="fine"> {g.evidence}</span> : null}
+                  </span>
+                  <span className="push actions" style={{ marginTop: 0 }}>
+                    <form action={keepIntentAction.bind(null, g.id)}>
+                      <button className="btn small" type="submit">
+                        Keep
+                      </button>
+                    </form>
+                    <form action={forgetIntentAction.bind(null, g.id)}>
+                      <button className="btn small ghost" type="submit">
+                        Not true
+                      </button>
+                    </form>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         <form action={stateIntentAction} className="tell">
           <input
             className="input"
             name="text"
             type="text"
-            placeholder="Something your agent should know"
+            placeholder="Something your agent should know about how you work"
             aria-label="Tell your agent"
             maxLength={300}
             required
@@ -486,7 +553,13 @@ export default async function InboxPage() {
             {known.map((k) => (
               <li key={k.id}>
                 <span className={`tag ${k.is_rule ? "rule" : ""}`}>
-                  {k.source === "stated" ? (k.is_rule ? "Rule" : "Guidance") : "Noticed"}
+                  {k.source === "stated"
+                    ? k.is_rule
+                      ? "Rule"
+                      : "Guidance"
+                    : k.source === "inferred"
+                      ? "You kept this"
+                      : "Noticed"}
                 </span>
                 <span>{k.text}</span>
                 <form action={forgetIntentAction.bind(null, k.id)} className="push">
@@ -498,9 +571,7 @@ export default async function InboxPage() {
             ))}
           </ul>
         ) : (
-          <p className="footnote">
-            Nothing yet. Whatever you write here stays with your account only.
-          </p>
+          <p className="footnote">Nothing yet. What you write here is only ever seen by you.</p>
         )}
       </section>
     </>

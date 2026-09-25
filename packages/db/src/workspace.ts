@@ -1177,13 +1177,14 @@ export async function createIntent(
 export async function listIntents(
   sql: Sql,
   ctx: UserContext,
-  opts: { status?: IntentRow["status"]; limit?: number } = {},
+  opts: { status?: IntentRow["status"] | "all"; limit?: number } = {},
 ): Promise<IntentRow[]> {
   return withUser(sql, ctx, async (tx) => {
+    const status = opts.status ?? "active";
     const rows = await db(tx)
       .select()
       .from(schema.intents)
-      .where(eq(schema.intents.status, opts.status ?? "active"))
+      .where(status === "all" ? undefined : eq(schema.intents.status, status))
       .orderBy(desc(schema.intents.created_at))
       .limit(opts.limit ?? 100);
     return rows.map((r) => ({
@@ -1201,14 +1202,77 @@ export async function listIntents(
   });
 }
 
+/** Retires an active entry, or declines a proposed one. Either way it is gone and never re-proposed. */
 export async function retireIntent(sql: Sql, ctx: UserContext, id: string): Promise<boolean> {
   return withUser(sql, ctx, async (tx) => {
     const rows = await db(tx)
       .update(schema.intents)
       .set({ status: "retired", retired_at: rawSql`now()`, updated_at: rawSql`now()` })
-      .where(and(eq(schema.intents.id, id), eq(schema.intents.status, "active")))
+      .where(and(eq(schema.intents.id, id), inArray(schema.intents.status, ["active", "proposed"])))
       .returning({ id: schema.intents.id });
     return rows.length === 1;
+  });
+}
+
+/** The person keeps what the agent inferred: proposed → active. Only from proposed. */
+export async function confirmIntent(sql: Sql, ctx: UserContext, id: string): Promise<boolean> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .update(schema.intents)
+      .set({ status: "active", updated_at: rawSql`now()` })
+      .where(and(eq(schema.intents.id, id), eq(schema.intents.status, "proposed")))
+      .returning({ id: schema.intents.id });
+    return rows.length === 1;
+  });
+}
+
+export type DecidedObligationRow = {
+  kind: "awaiting_you" | "awaiting_them" | "unsent_followup";
+  outcome: "drafted" | "snoozed" | "dismissed" | "resolved";
+  days_elapsed: number;
+  decided_at: string;
+  contact_address: string;
+  contact_display_name: string;
+  contact_account_name: string | null;
+};
+
+/** What the person decided, with how old each item was when they did. */
+export async function listDecidedObligations(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { since: Date },
+): Promise<DecidedObligationRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<
+      Array<{
+        kind: DecidedObligationRow["kind"];
+        outcome: DecidedObligationRow["outcome"];
+        days_elapsed: number | null;
+        decided_at: Date;
+        contact_address: string;
+        contact_display_name: string;
+        contact_account_name: string | null;
+      }>
+    >`
+      SELECT o.kind, o.outcome, (o.reason->>'days_elapsed')::int AS days_elapsed,
+             o.updated_at AS decided_at,
+             c.external_id AS contact_address, c.display_name AS contact_display_name,
+             c.account_name AS contact_account_name
+      FROM obligations o
+      JOIN contacts c ON c.id = o.contact_id
+      WHERE o.outcome IN ('drafted', 'snoozed', 'dismissed', 'resolved')
+        AND o.updated_at >= ${opts.since.toISOString()}::timestamptz
+      ORDER BY o.updated_at, o.id
+    `;
+    return rows.map((r) => ({
+      kind: r.kind,
+      outcome: r.outcome,
+      days_elapsed: Number(r.days_elapsed ?? 0),
+      decided_at: new Date(r.decided_at).toISOString(),
+      contact_address: r.contact_address,
+      contact_display_name: r.contact_display_name,
+      contact_account_name: r.contact_account_name,
+    }));
   });
 }
 

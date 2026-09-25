@@ -63,8 +63,10 @@ export type IntentView = {
   id: string;
   text: string;
   source: "stated" | "observed" | "inferred";
+  status: "active" | "proposed" | "retired";
   scope: { kind: "global" | "contact" | "account" | "situation"; value?: string };
   is_rule: boolean;
+  evidence: string | null;
   created_at: string;
 };
 
@@ -94,6 +96,13 @@ export type ActionView = {
   created_at: string;
   can_revert: boolean;
   can_promote: boolean;
+  record: string;
+  contact_display_name: string;
+  changes: Array<{
+    field: "next_step" | "close_date" | "subject" | "date";
+    from: string | null;
+    to: string;
+  }>;
 };
 
 /** A routine the agent found in what the person did. */
@@ -191,6 +200,7 @@ export const me = {
     call<{ routine: RoutineView }>("POST", `/v1/me/routines/${id}/start`),
   stateIntent: (text: string) => call<{ intent: IntentView }>("POST", "/v1/me/intents", { text }),
   retireIntent: (id: string) => call<{ id: string }>("POST", `/v1/me/intents/${id}/retire`),
+  keepIntent: (id: string) => call<{ id: string }>("POST", `/v1/me/intents/${id}/keep`),
   connections: () => call<{ connections: ConnectionView[] }>("GET", "/v1/me/connections"),
   authorize: (provider: string) =>
     call<{ authorization_url: string }>("POST", `/v1/me/connections/${provider}/authorize`),
@@ -230,4 +240,8 @@ export {
   nextMeetingLine,
   routineEvidenceLine,
   routineRunsLine,
+  initials,
+  longDate,
+  checkedLine,
+  stepLine,
 } from "./explain.js";

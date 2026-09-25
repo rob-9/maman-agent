@@ -5,6 +5,10 @@ import {
   nextMeetingLine,
   routineEvidenceLine,
   routineRunsLine,
+  initials,
+  longDate,
+  checkedLine,
+  stepLine,
   type ObligationView,
 } from "../src/lib/explain.js";
 
@@ -171,5 +175,39 @@ describe("how a routine has run, in one line", () => {
     expect(routineRunsLine({ ...base, mode: "supervised", supervised_completed: 2 })).toBe(
       "Running. Produced drafts or proposals 2 times, each for your approval.",
     );
+  });
+});
+
+describe("small words on the page", () => {
+  it("initials, long dates, and how long since the mailbox was checked", () => {
+    expect(initials("Sarah Chen")).toBe("SC");
+    expect(initials("bob@client.com")).toBe("B");
+    expect(initials("Priya")).toBe("P");
+    expect(longDate("2026-09-30")).toBe("Sep 30, 2026");
+    expect(longDate("send the MSA")).toBe("send the MSA");
+    const now = new Date("2026-09-23T10:00:00.000Z");
+    expect(
+      checkedLine([{ provider: "gmail", last_synced_at: "2026-09-23T09:57:30.000Z" }], now),
+    ).toBe("Checked 3 minutes ago");
+    expect(
+      checkedLine([{ provider: "gmail", last_synced_at: "2026-09-23T09:59:50.000Z" }], now),
+    ).toBe("Checked just now");
+    expect(
+      checkedLine([{ provider: "gmail", last_synced_at: "2026-09-23T07:00:00.000Z" }], now),
+    ).toBe("Checked 3 hours ago");
+    expect(checkedLine([{ provider: "gmail", last_synced_at: null }], now)).toBeNull();
+    expect(checkedLine([], now)).toBeNull();
+  });
+  it("says what the agent would do for a step, by app", () => {
+    expect(stepLine({ app: "Gmail", automation: "automated", mode: "read" })).toBe(
+      "your agent notices this in Gmail",
+    );
+    expect(stepLine({ app: "Gmail", automation: "automated", mode: "propose_write" })).toBe(
+      "your agent drafts it, you send",
+    );
+    expect(stepLine({ app: "Salesforce", automation: "automated", mode: "propose_write" })).toBe(
+      "your agent proposes it, you approve",
+    );
+    expect(stepLine({ app: "Calendar", automation: "manual", mode: null })).toBe("stays with you");
   });
 });

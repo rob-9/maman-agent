@@ -69,6 +69,15 @@ export const intentRuleSchema = z.discriminatedUnion("kind", [
       scope: intentScopeSchema,
     })
     .strict(),
+
+  /** Leave a thread alone this long before calling it "gone quiet". */
+  z
+    .object({
+      kind: z.literal("chase_after_days"),
+      days: z.number().int().min(1).max(30),
+      scope: intentScopeSchema,
+    })
+    .strict(),
 ]);
 export type IntentRule = z.infer<typeof intentRuleSchema>;
 
@@ -211,6 +220,13 @@ export function applyIntentRules(
     const contact = contactsById.get(o.contact_id);
     const chases = threadsById.get(o.thread_id)?.chase_count ?? 0;
     const hit = rules.find(({ rule }) => {
+      if (rule.kind === "chase_after_days") {
+        return (
+          o.kind === "awaiting_them" &&
+          inScope(rule.scope, contact, o.kind) &&
+          o.reason.days_elapsed < rule.days
+        );
+      }
       if (rule.kind !== "no_chase" && rule.kind !== "max_chases") return false;
       if (!inScope(rule.scope, contact, o.kind)) return false;
       if (rule.kind === "no_chase") return true;

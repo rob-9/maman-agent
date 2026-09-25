@@ -29,6 +29,8 @@ import {
   createIntent,
   listIntents,
   retireIntent,
+  confirmIntent,
+  listDecidedObligations,
   listSkippedObligations,
   loadEventFacts,
   recordWorkflowEvents,
@@ -1465,5 +1467,103 @@ describe("runs of an accepted routine", () => {
     expect(await listRoutineRuns(db.client.sql, { organizationId: orgId, userId: other })).toEqual(
       [],
     );
+  });
+});
+
+describe("what the agent inferred, held until kept", () => {
+  const NOW = new Date("2026-09-22T12:00:00.000Z");
+  it("a proposed entry is not active, can be kept once, and a declined one is retired and never active", async () => {
+    const { id } = await createIntent(db.client.sql, ctx, {
+      text_ciphertext: new Uint8Array([1]),
+      text_chars: 1,
+      source: "inferred",
+      status: "proposed",
+      scope_kind: "contact",
+      scope_value: "bob@client.com",
+      rule: { kind: "no_chase", scope: { kind: "contact", value: "bob@client.com" } },
+      origin: { evidence: "You set aside 2 follow-ups with Bob." },
+    });
+    expect((await listIntents(db.client.sql, ctx)).some((r) => r.id === id)).toBe(false);
+    expect(
+      (await listIntents(db.client.sql, ctx, { status: "proposed" })).some((r) => r.id === id),
+    ).toBe(true);
+    expect(
+      (await listIntents(db.client.sql, ctx, { status: "all" })).some((r) => r.id === id),
+    ).toBe(true);
+    expect(await confirmIntent(db.client.sql, ctx, id)).toBe(true);
+    expect(await confirmIntent(db.client.sql, ctx, id)).toBe(false);
+    expect((await listIntents(db.client.sql, ctx)).some((r) => r.id === id)).toBe(true);
+    const declined = await createIntent(db.client.sql, ctx, {
+      text_ciphertext: new Uint8Array([1]),
+      text_chars: 1,
+      source: "inferred",
+      status: "proposed",
+      scope_kind: "global",
+      rule: { kind: "chase_after_days", days: 8, scope: { kind: "global" } },
+    });
+    expect(await retireIntent(db.client.sql, ctx, declined.id)).toBe(true);
+    expect(await confirmIntent(db.client.sql, ctx, declined.id)).toBe(false);
+    expect(
+      (await listIntents(db.client.sql, ctx, { status: "all" })).find((r) => r.id === declined.id)
+        ?.status,
+    ).toBe("retired");
+  });
+
+  it("decisions come back with how old each item was when decided, and who it was with", async () => {
+    await upsertSyncedThreads(db.client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-decided",
+          subject: "Decided",
+          last_message_at: "2026-09-10T09:00:00.000Z",
+        }),
+      ],
+    });
+    const { threads } = await loadDetectionInputs(db.client.sql, ctx);
+    const t = threads.find((x) => x.subject === "Decided")!;
+    await replacePendingObligations(
+      db.client.sql,
+      ctx,
+      [
+        {
+          thread_id: t.thread_id,
+          contact_id: t.contact_id,
+          kind: "awaiting_them",
+          rank: 30,
+          reason: {
+            kind: "awaiting_them",
+            days_elapsed: 6,
+            threshold_days: 5,
+            last_direction: "outbound",
+            message_count: 2,
+            has_open_deal: null,
+          },
+        },
+      ],
+      NOW,
+    );
+    const pending = (await listPendingObligations(db.client.sql, ctx)).find(
+      (o) => o.thread_id === t.thread_id,
+    )!;
+    expect(await setObligationOutcome(db.client.sql, ctx, pending.id, "dismissed")).toBe(true);
+    const rows = await listDecidedObligations(db.client.sql, ctx, {
+      since: new Date("2026-09-01T00:00:00.000Z"),
+    });
+    const mine = rows.find(
+      (r) => r.contact_address === "bob@client.com" && r.outcome === "dismissed",
+    )!;
+    expect(mine).toMatchObject({
+      kind: "awaiting_them",
+      days_elapsed: 6,
+      contact_display_name: "Bob Jones",
+    });
+    expect(
+      await listDecidedObligations(
+        db.client.sql,
+        { organizationId: orgId, userId: uuidv7() },
+        { since: NOW },
+      ),
+    ).toEqual([]);
   });
 });

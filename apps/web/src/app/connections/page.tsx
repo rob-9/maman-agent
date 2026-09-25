@@ -23,10 +23,7 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
       <div className="page-head">
         <div>
           <h1>Connections</h1>
-          <p className="lede">
-            What your agent can read, and on whose behalf. Tokens are encrypted and never shown
-            here.
-          </p>
+          <p className="lede">What your agent can read, and who connected it.</p>
         </div>
       </div>
 
@@ -38,12 +35,12 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
 
       <Section
         title="Yours"
-        blurb="Connected by you and visible only to you. No one else in your organization can see what it syncs, including admins."
+        blurb="Connected by you. Only you can see what comes through it, admins included."
       >
         <Integration
           mark={<GmailMark size={26} />}
           name="Google"
-          description="Gmail and Calendar. Reads your mail and meetings so your agent has the full picture. Stored encrypted to your account and visible only to you. Creates drafts but cannot send."
+          description="Gmail and Calendar. Your agent reads your mail and meetings, and writes drafts. It cannot send."
           presentation={describeGmail(gmail)}
           action={
             gmail && gmail.status === "active" ? (
@@ -65,12 +62,12 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
 
       <Section
         title="Your team's"
-        blurb="Connected once for the whole organization. Used only to check which of your contacts have an open deal, so the list can rank by what is at stake."
+        blurb="Connected once for the whole team. Used to see which of your contacts have an open deal, and to log emails and update deals when you approve it."
       >
         <Integration
           mark={<SalesforceMark size={28} />}
           name="Salesforce"
-          description="Reads the open opportunities your contacts are on. Read only. Nothing in Salesforce is changed."
+          description="Reads the deals your contacts are on. Writes only what you approve, and checks every write afterwards."
           presentation={describeCrm(salesforce)}
           action={
             salesforce && salesforce.status === "connected" ? (

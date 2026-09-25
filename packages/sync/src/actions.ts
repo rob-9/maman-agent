@@ -713,6 +713,16 @@ export type ActionView = {
   can_revert: boolean;
   /** Whether "Always" is available: the organization allows this kind unattended. */
   can_promote: boolean;
+  /** What the write is about: the opportunity's name, or the email's subject. */
+  record: string;
+  /** Who it concerns. */
+  contact_display_name: string;
+  /** Each field the write touches, before and after. Plain labels, ISO dates. */
+  changes: Array<{
+    field: "next_step" | "close_date" | "subject" | "date";
+    from: string | null;
+    to: string;
+  }>;
 };
 
 export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promise<ActionView[]> {
@@ -744,6 +754,28 @@ export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promi
         summary: `Update ${d.opportunity_name}: ${parts.join(", ")}`,
         detail: `From the thread with ${d.contact_display_name}.`,
         quotes: Object.values(d.changes).map((c) => c.quote),
+        record: d.opportunity_name,
+        contact_display_name: d.contact_display_name,
+        changes: [
+          ...(d.changes.next_step
+            ? [
+                {
+                  field: "next_step" as const,
+                  from: d.changes.next_step.from,
+                  to: d.changes.next_step.to,
+                },
+              ]
+            : []),
+          ...(d.changes.close_date
+            ? [
+                {
+                  field: "close_date" as const,
+                  from: d.changes.close_date.from,
+                  to: d.changes.close_date.to,
+                },
+              ]
+            : []),
+        ],
       };
     }
     const d = r.diff as ActivityDiff;
@@ -752,6 +784,12 @@ export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promi
       summary: `Log to Salesforce: ${d.subject}`,
       detail: `${d.description} Against ${d.contact_display_name}${d.what_id ? " and their open opportunity" : ""}.`,
       quotes: [],
+      record: d.subject,
+      contact_display_name: d.contact_display_name,
+      changes: [
+        { field: "subject" as const, from: null, to: d.subject },
+        { field: "date" as const, from: null, to: d.activity_date },
+      ],
     };
   });
 }

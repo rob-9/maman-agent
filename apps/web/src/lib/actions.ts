@@ -139,3 +139,10 @@ export async function startRoutineAction(id: string): Promise<void> {
   revalidatePath("/");
   if (!res.ok) throw new Error(`could not start (${res.detail ?? res.status})`);
 }
+
+/** The person keeps something their agent worked out from what they did. */
+export async function keepIntentAction(id: string): Promise<void> {
+  const res = await me.keepIntent(id);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not keep that (${res.status})`);
+}

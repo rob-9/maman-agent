@@ -1,5 +1,6 @@
 import type { Sql } from "postgres";
 import {
+  confirmIntent,
   createIntent,
   listIntents,
   listSkippedObligations,
@@ -36,8 +37,11 @@ export type IntentView = {
   id: string;
   text: string;
   source: IntentRow["source"];
+  status: IntentRow["status"];
   scope: IntentScope;
   is_rule: boolean;
+  /** For an inferred entry: what the agent saw, in plain words. */
+  evidence: string | null;
   created_at: string;
 };
 
@@ -80,23 +84,38 @@ export async function stateIntent(
     id,
     text: clean,
     source,
+    status: "active",
     scope,
     is_rule: rule !== null,
+    evidence: null,
     created_at: new Date().toISOString(),
   };
 }
 
-/** Everything active, decrypted, newest first: the page the person reads. */
+/** Everything active, and what the agent proposes, decrypted, newest first: the page the person reads. */
 export async function listIntentViews(deps: IntentDeps, ctx: UserContext): Promise<IntentView[]> {
-  const rows = await listIntents(deps.sql, ctx);
-  return rows.map((r) => ({
+  const [active, proposed] = await Promise.all([
+    listIntents(deps.sql, ctx),
+    listIntents(deps.sql, ctx, { status: "proposed" }),
+  ]);
+  return [...proposed, ...active].map((r) => ({
     id: r.id,
     text: decryptBody(r.text_ciphertext, deps.contentKey, ctx),
     source: r.source,
+    status: r.status,
     scope: { kind: r.scope_kind, ...(r.scope_value ? { value: r.scope_value } : {}) },
     is_rule: r.rule !== null,
+    evidence:
+      r.origin && typeof r.origin === "object" && "evidence" in r.origin
+        ? String((r.origin as { evidence: unknown }).evidence)
+        : null,
     created_at: r.created_at,
   }));
+}
+
+/** The person keeps what the agent inferred. */
+export async function keepIntent(deps: IntentDeps, ctx: UserContext, id: string): Promise<boolean> {
+  return confirmIntent(deps.sql, ctx, id);
 }
 
 export async function forgetIntent(
