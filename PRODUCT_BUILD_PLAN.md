@@ -591,6 +591,8 @@ Each of these is real, found in this codebase, and cost something.
 | Phase 3, step 3: the proposal card                                 | ✅ a Routines section on the Inbox: each eligible routine in plain words with its steps, what a helper could do for each, and the evidence (how often, on how many days, around whom by name); Accept, Not now, Never; "not now" on the row with the cooldown, "accepted" and "never" as entries in the intent store bound to the routine's signature, so forgetting the entry is the undo; a forming routine cannot be accepted; forming routines listed with what they still need; 2 + 2 unit, 3 + 4 + 1 integration, 5 drilled                                                                                                                                                                                               |
 | Phase 3, step 4: compile and run                                   | ✅ an accepted routine compiled deterministically into an immutable AgentSpec (trigger from its first step, every later step on the catalog's capability, never in write mode) and stored as an agent in shadow; one run per trigger event after acceptance; shadow runs record which steps the routine would take, wait for the episode to close, then compare with which steps the person took, with the gap named; three that agree make it ready; Start moves it to supervised, where a trigger produces a draft and a CRM proposal through the existing jobs, each still for approval; `routine_runs` (migration 0019); a decision on a card now lifts when the thread moves; 4 + 1 unit, 3 + 4 + 1 integration, 5 drilled |
 | The demo world (CONNECTOR_MODE=demo)                               | ✅ a scripted Gmail, Calendar and Salesforce in memory that answers the real adapters' requests with the real shapes, so every path runs unchanged on a machine with no credentials: eight threads, six meetings, eight deals, a routine repeated four times; writes land in it and are read back from it; "Connect Google" and "Connect Salesforce" land on our own callback with a demo code and the same exchange and storage run; the deterministic next-step reader now prefers the plainest sentence; routine steps in plain words; 4 + 1 unit, 2 integration                                                                                                                                                             |
+| The web app, redesigned, and the words on it                       | ✅ one stylesheet with a token set; a top bar with the page marked; a summary strip that jumps to each section; cards with the person, a colour edge by reason, the age, tags, the sentence, the facts in one line, one primary action and a quiet "Not needed" panel; Salesforce proposals as field-by-field changes with the sentences under them; routines as a sentence, the evidence, and the steps as a flow saying what the agent would do; "Checked N minutes ago"; phone layout; every line of copy rewritten to say what happens in plain words; the judgment's sentence no longer carries a day count that goes stale; 4 unit, 1 integration                                                                         |
+| Intent inferred from what the person did, held until kept          | ✅ the third kind of intent: after each sweep, the person's decisions (what they set aside and how old it was) are read for patterns; two dismissals of one person, three across an account, or three young follow-ups set aside become proposals in the person's words with the evidence beside them; a new rule, "wait N days before chasing", enforced in detection once kept; nothing applies until kept; a declined proposal is never made again; "Your agent thinks" on the page with Keep and Not true; 6 + 2 unit, 2 + 2 + 1 integration, 3 drilled                                                                                                                                                                     |
 | Web UI — Inbox + Connections                                       | ✅ `apps/web` is the product; server components + server actions, identity never in the browser; admin moved under `/admin`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Draft creation (`gmail.compose`, never send)                       | ✅ `gmail-draft.ts` + `voice-engine` deterministic composer + `POST /v1/me/obligations/:id/draft`; failure branch tested                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Real auth (WorkOS AuthKit)                                         | ✅ `apps/api/src/workos.ts` JWKS verifier + JIT-provisioning resolver; web sign-in/out via `authkit-nextjs`; 12 unit + 12 integration, 3 drilled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -1554,6 +1556,91 @@ always were.
 Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
 **246** (sync 67, worker 11, db 96, api 72) · build 5/5.
 
+**The web app, redesigned, and the words on it (2026-09-23).** The owner
+saw the product and said it was ugly and read as machine-written. Both were
+fair. The page had a column of five equal buttons on every card, the
+person's name set as a small grey label, section names in tiny capitals,
+and copy that explained the mechanism instead of saying what would happen.
+
+What changed. One stylesheet with a small token set, and every page built
+from a short list of parts. A top bar with a mark and the current page
+marked. A summary strip under the title (replies owed, drafts ready,
+Salesforce changes to approve, routines found), each jumping to its
+section, with "Checked N minutes ago" beside the button. A card is one
+person and one next move: initials, the name as the title, the age on the
+right, a colour edge by reason, tags, the agent's sentence, the facts in one
+quiet line, one primary button and the rest light, with "Not needed" opening
+a small panel for the reason instead of a permanent input on every card. A
+Salesforce proposal shows the deal by name and each field before and after,
+with the sentences it rests on underneath. A routine is its sentence, the
+evidence line, and the steps as a flow, each step saying what the agent
+would do ("your agent drafts it, you send", "your agent notices this in
+Gmail"). Phone width works without horizontal scroll. The admin pages keep
+their classes.
+
+The words. Every line was rewritten to say what happens, in the words the
+person would use: "They're waiting on you", "Met, nothing sent", "No reply
+yet"; "Changes your agent wants to make. Nothing changes until you approve
+it."; "Patterns your agent has noticed in how you work"; "Done, checked";
+"Skipped, it changed since you looked". The page is called Follow-ups.
+
+One real fix underneath: the deterministic judgment's sentence carried a
+day count ("3 days ago") that went stale, because a judgment is kept until
+the thread moves while the card's own clock keeps counting. The sentence no
+longer carries a count; the card does.
+
+Tests: initials, long dates, "checked … ago", the step line (web); the
+structured changes on a proposal (API). Gate: lint 26/26, typecheck 26/26,
+unit 25/25, integration as at the last increment plus the one assertion,
+build 5/5.
+
+**Intent inferred from what the person did, held until kept (2026-09-24).**
+The plan's third kind of intent, "confirmed": what the agent infers from
+actions, held as a proposal until the person sees it and keeps it. Until
+now the store had stated and observed entries only.
+
+The inference (`obligation-engine/src/infer.ts`) is deterministic and reads
+the person's decisions from the last 90 days: what they set aside, snoozed,
+drafted or resolved, and how old each item was when they did. Three
+patterns, each named with its evidence:
+
+- Two follow-ups set aside with one person: "Don't chase Bob Ray." ("You
+  set aside 2 follow-ups with Bob Ray.")
+- Three across an account from at least two people there: "Don't chase
+  Client Co."
+- Three threads gone quiet set aside while younger than N days, and none
+  acted on that young: "Wait N days before chasing." This is a new rule,
+  `chase_after_days`, enforced in detection like the others once kept: a
+  thread gone quiet for fewer days than the wait is set aside, with the
+  entry named, while a reply owed is never touched.
+
+The thresholds are small on purpose. The person confirms, so a wrong guess
+costs one click, and no guess costs a rule they had to type.
+
+The lifecycle. A proposal is an intent entry with source `inferred` and
+status `proposed`. It is not a rule and not guidance until kept: the rules
+and the retrieval read active entries only. "Keep" moves it to active;
+"Not true" retires it, and a retired rule of the same kind and scope is
+never proposed again, so a declined guess stays declined. The sweep runs
+the inference after judgment and drafting, before the event stream, so the
+new entry is an event too. On the page, "Your agent thinks" sits above the
+box where the person tells it things, each guess with its evidence and the
+two buttons; a kept one joins the list below tagged "You kept this".
+
+Tests. Engine (6): each pattern and its threshold, a reply owed never a
+chase, acting on a young one cancels the waiting rule, a declined rule
+never re-proposed, the waiting rule applied and scoped. Repository (2):
+proposed is not active, kept once, declined retired; decisions with age and
+person. Sweep (2, a fresh person): two dismissals become a proposal with the
+evidence and not a rule, proposed once; kept, it is enforced on the next
+detection, and a declined waiting rule is never proposed again. HTTP (1).
+Three drilled: the dedupe of declined rules removed, the waiting rule not
+enforced, an inference stored active instead of proposed. Each fails the
+test written for it.
+
+Gate at this point: lint 26/26 · typecheck 26/26 · unit 25/25 · integration
+**251** (sync 69, worker 11, db 98, api 73) · build 5/5.
+
 **Phase 1: foundations and first value. Done (2026-09-21).**
 Monorepo, contracts, DB with RLS, real auth (WorkOS), Gmail per person and
 Salesforce per organization, the deterministic detector, the ranked list with a
@@ -1585,8 +1672,9 @@ as fallback, and each is tested in both modes.
    retrieval by scope; enforcement by rule where a sentence is a rule; the
    rest to the model as the person's own instructions; what was set aside
    shown with the sentence that did it; a box to tell the agent and a list to
-   forget from. Still to come here: inferred entries held for confirmation,
-   and speech as a transcription step in front of the same box.
+   forget from. Inferred entries held for confirmation are built (see the
+   note of 2026-09-24). Still to come: speech as a transcription step in
+   front of the same box.
 5. _Pre-drafting._ ✅ The sweep drafts the top items the agent judged owed,
    honouring the store, so the person opens the app and the drafts are there.
    Still never sent.
