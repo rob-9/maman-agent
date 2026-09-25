@@ -98,7 +98,9 @@ describe("the demo world answers the real adapters", () => {
       thread_id: "t-northwind",
     });
     expect(d.draft_id).toBe("draft-1");
-    expect(world.state().drafts).toEqual([{ id: "draft-1", thread_id: "t-northwind" }]);
+    expect(world.state().drafts).toEqual([
+      { id: "draft-1", thread_id: "t-northwind", sent: false },
+    ]);
     const tok = await world.token("https://any", {
       grant_type: "authorization_code",
       code: "demo",

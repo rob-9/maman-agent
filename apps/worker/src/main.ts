@@ -20,7 +20,7 @@ import { createModelProvider, DeterministicModelProvider } from "@maman/model-pr
 import { deterministicContextComposer, modelComposer } from "@maman/voice-engine";
 import { createDbClient } from "@maman/db";
 import { createConnectorTokenTransport } from "@maman/connector-auth";
-import { createDemoWorld } from "@maman/connector-adapters";
+import { createDemoWorld, defaultDemoWorldStateFile, fileStore } from "@maman/connector-adapters";
 import { createActivities, type PersistenceSink } from "./activities.js";
 import {
   createSweepActivities,
@@ -130,7 +130,12 @@ const sink: PersistenceSink = {
 };
 
 /** With no credentials on this machine, the scripted connectors (see the API). */
-const demo = env.CONNECTOR_MODE === "demo" ? createDemoWorld() : null;
+const demo =
+  env.CONNECTOR_MODE === "demo"
+    ? createDemoWorld({
+        store: fileStore(env.DEMO_WORLD_STATE_FILE ?? defaultDemoWorldStateFile()),
+      })
+    : null;
 const tokenTransport = demo ? demo.token : createConnectorTokenTransport();
 const wire = demo ? demo.transport : fetchTransport;
 
@@ -188,6 +193,8 @@ function buildSweepActivities() {
         transport: wire,
       }),
       orgPolicy: orgPolicyResolver(sql),
+      // Sends go out as the person, through their own Gmail connection.
+      gmail: { credentials, transport: wire },
     },
     // The event stream, unless switched off.
     ...(env.EVENT_STREAM === "off" ? {} : { events: {} }),

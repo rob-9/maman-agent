@@ -29,6 +29,7 @@ import {
   decideRoutineAction,
   startRoutineAction,
   keepIntentAction,
+  proposeSendAction,
 } from "@/lib/actions";
 
 export const dynamic = "force-dynamic";
@@ -42,8 +43,9 @@ const KIND_LABEL = {
 const FIELD_LABEL = {
   next_step: "Next step",
   close_date: "Close date",
-  subject: "Email",
+  subject: "Subject",
   date: "Date",
+  to: "To",
 } as const;
 
 function daysWord(n: number): string {
@@ -97,7 +99,8 @@ export default async function InboxPage() {
   const guesses = allIntents.filter((k) => k.status === "proposed");
   const week = draftsLine(obligations.data.drafts_this_week);
   const crm = actions.ok ? actions.data.actions : [];
-  const proposals = crm.filter((a) => a.status === "proposed");
+  const outgoing = crm.filter((a) => a.kind === "gmail.send" && a.status === "proposed");
+  const proposals = crm.filter((a) => a.kind !== "gmail.send" && a.status === "proposed");
   const done = crm.filter((a) => a.status !== "proposed" && a.status !== "declined").slice(0, 8);
   const ready = items.filter((o) => o.draft !== null).length;
   const owed = items.filter((o) => o.kind === "awaiting_you").length;
@@ -210,9 +213,21 @@ export default async function InboxPage() {
               </div>
               <div className="actions">
                 {o.draft ? (
-                  <a className="btn" href={gmailDraftUrl(o.draft)} target="_blank" rel="noreferrer">
-                    Open draft in Gmail
-                  </a>
+                  <>
+                    <a
+                      className="btn"
+                      href={gmailDraftUrl(o.draft)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open draft in Gmail
+                    </a>
+                    <form action={proposeSendAction.bind(null, o.id)}>
+                      <button className="btn secondary" type="submit">
+                        Send
+                      </button>
+                    </form>
+                  </>
                 ) : (
                   <form action={draftAction.bind(null, o.id)}>
                     <button className="btn" type="submit">
@@ -266,11 +281,67 @@ export default async function InboxPage() {
 
       {items.length > 0 ? (
         <p className="footnote">
-          Drafts go to your Gmail Drafts folder. Nothing is sent until you open one and press Send.
+          Drafts go to your Gmail Drafts folder. Nothing is sent until you press Send, here or in
+          Gmail.
         </p>
       ) : null}
 
-      {proposals.length > 0 || done.length > 0 ? (
+      {outgoing.length > 0 ? (
+        <section className="section" id="outgoing">
+          <div className="section-head">
+            <div>
+              <h2>Ready to send</h2>
+              <p>
+                Exactly what would go out, from your Gmail, as you. Nothing is sent until you press
+                Send here. A sent email cannot be taken back, so there is no undo.
+              </p>
+            </div>
+            <span className="count">
+              {outgoing.length} {outgoing.length === 1 ? "message" : "messages"}
+            </span>
+          </div>
+          <div className="stack">
+            {outgoing.map((a) => (
+              <div key={a.id} className="card proposal">
+                <span className="title">{a.summary}</span>
+                <span className="detail">{a.detail}</span>
+                <dl className="diff">
+                  {a.changes.map((c) => (
+                    <div key={c.field} className="diff-row">
+                      <dt>{FIELD_LABEL[c.field]}</dt>
+                      <dd>
+                        <span className="to">{c.to}</span>
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+                {a.message ? <pre className="message">{a.message}</pre> : null}
+                <div className="actions">
+                  <form action={approveActionAction.bind(null, a.id, a.diff_sha256)}>
+                    <button className="btn" type="submit">
+                      Send now
+                    </button>
+                  </form>
+                  {a.can_promote ? (
+                    <form action={alwaysActionAction.bind(null, a.id)}>
+                      <button className="btn secondary" type="submit">
+                        Always
+                      </button>
+                    </form>
+                  ) : null}
+                  <form action={declineActionAction.bind(null, a.id)}>
+                    <button className="btn ghost" type="submit">
+                      Not now
+                    </button>
+                  </form>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {proposals.length > 0 ? (
         <section className="section" id="salesforce">
           <div className="section-head">
             <div>
@@ -340,37 +411,56 @@ export default async function InboxPage() {
                 </div>
               </div>
             ))}
-            {done.length > 0 ? (
-              <ul className="rows">
-                {done.map((a) => (
-                  <li key={a.id}>
-                    <span
-                      className={`status ${a.status === "verified" ? "ok" : a.status === "reverted" ? "none" : a.status === "failed" || a.status === "stale" ? "bad" : "warn"}`}
-                    >
-                      {a.status === "verified"
-                        ? "Done, checked"
-                        : a.status === "reverted"
-                          ? "Undone"
-                          : a.status === "failed"
-                            ? "Not written"
-                            : a.status === "stale"
-                              ? "Skipped, it changed since you looked"
-                              : a.status}
-                    </span>
-                    <span>{a.summary}</span>
-                    {a.error ? <span className="fine">{a.error}</span> : null}
-                    {a.can_revert && a.status !== "reverted" ? (
-                      <form action={revertActionAction.bind(null, a.id)} className="push">
-                        <button type="submit" className="link">
-                          Undo
-                        </button>
-                      </form>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
           </div>
+        </section>
+      ) : null}
+
+      {done.length > 0 ? (
+        <section className="section" id="done">
+          <div className="section-head">
+            <div>
+              <h2>Done</h2>
+              <p>
+                What your agent did and how it went. Each write was checked afterwards. A Salesforce
+                change can be undone; a sent email cannot.
+              </p>
+            </div>
+          </div>
+          <ul className="rows">
+            {done.map((a) => (
+              <li key={a.id}>
+                <span
+                  className={`status ${a.status === "verified" ? "ok" : a.status === "reverted" ? "none" : a.status === "failed" || a.status === "stale" ? "bad" : "warn"}`}
+                >
+                  {a.status === "verified"
+                    ? a.kind === "gmail.send"
+                      ? "Sent, confirmed"
+                      : "Done, checked"
+                    : a.status === "reverted"
+                      ? "Undone"
+                      : a.status === "failed"
+                        ? a.kind === "gmail.send"
+                          ? "Not sent"
+                          : "Not written"
+                        : a.status === "stale"
+                          ? "Skipped, it changed since you looked"
+                          : a.status}
+                </span>
+                <span>{a.summary}</span>
+                {a.error ? <span className="fine">{a.error}</span> : null}
+                {a.kind === "gmail.send" && a.status === "verified" ? (
+                  <span className="fine">No undo for a sent email.</span>
+                ) : null}
+                {a.can_revert && a.status !== "reverted" ? (
+                  <form action={revertActionAction.bind(null, a.id)} className="push">
+                    <button type="submit" className="link">
+                      Undo
+                    </button>
+                  </form>
+                ) : null}
+              </li>
+            ))}
+          </ul>
         </section>
       ) : null}
 

@@ -21,6 +21,12 @@ export const orgPolicySchema = z
     max_records_written: z.number().int().positive().max(500),
     /** Medium-risk capabilities the org allows unattended in supervised mode. */
     unattended_medium_capabilities: z.array(z.string()).default([]),
+    /**
+     * Whether a person may promote sending mail to run without asking. Off by
+     * default: a sent email cannot be taken back, so the organization decides
+     * whether that gate may be opened at all. The person still has to open it.
+     */
+    allow_unattended_send: z.boolean().default(false),
     max_run_cost_usd: z.number().positive(),
     max_monthly_model_cost_usd: z.number().positive(),
     allow_scheduled_supervised: z.boolean().default(false),
@@ -50,6 +56,7 @@ export const DEFAULT_ORG_POLICY: OrgPolicy = orgPolicySchema.parse({
   max_records_read: 10_000,
   max_records_written: 500,
   unattended_medium_capabilities: [],
+  allow_unattended_send: false,
   max_run_cost_usd: 5,
   max_monthly_model_cost_usd: 250,
   allow_scheduled_supervised: false,

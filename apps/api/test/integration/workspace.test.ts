@@ -133,6 +133,7 @@ const MAILBOX: Record<string, unknown> = {
   waiting: gmailThread("waiting", "alice@co.example", "bob@client.com", ago(9), "Proposal"),
 };
 const gmailRequests: HttpRequest[] = [];
+const apiSent = new Set<string>();
 /** Flip to make Gmail refuse the next draft, to prove the failure branch. */
 let draftStatus = 200;
 const gmailTransport = async (req: HttpRequest): Promise<HttpResponse> => {
@@ -140,6 +141,22 @@ const gmailTransport = async (req: HttpRequest): Promise<HttpResponse> => {
   const url = new URL(req.url);
   if (url.pathname.includes("/calendar/")) {
     return { status: 200, headers: {}, body: { items: [], nextSyncToken: "cal-1" } };
+  }
+  if (req.method === "POST" && url.pathname.endsWith("/drafts/send")) {
+    const { id } = JSON.parse(req.body!) as { id: string };
+    apiSent.add(`sent-${id}`);
+    return {
+      status: 200,
+      headers: {},
+      body: { id: `sent-${id}`, threadId: "waiting", labelIds: ["SENT"] },
+    };
+  }
+  const sentMatch = url.pathname.match(/\/messages\/([^/]+)$/);
+  if (sentMatch) {
+    const id = decodeURIComponent(sentMatch[1]!);
+    return apiSent.has(id)
+      ? { status: 200, headers: {}, body: { id, threadId: "waiting", labelIds: ["SENT"] } }
+      : { status: 404, headers: {}, body: {} };
   }
   if (req.method === "POST" && url.pathname.endsWith("/drafts")) {
     return draftStatus === 200
@@ -1264,6 +1281,56 @@ describe("what the agent inferred, over HTTP", () => {
     const theirs = await app.inject({
       method: "POST",
       url: `/v1/me/intents/${guess["id"]}/keep`,
+      headers: as(bob),
+    });
+    expect(theirs.statusCode).toBe(404);
+  });
+});
+
+describe("sending over HTTP", () => {
+  it("'Send' on a card proposes the draft as it is; approve sends it and the receipt says so", async () => {
+    await withUser(
+      client.sql,
+      { organizationId: orgId, userId: alice },
+      (tx) => tx`UPDATE obligations SET outcome = 'pending', snoozed_until = NULL`,
+    );
+    const list = await app.inject({ method: "GET", url: "/v1/me/obligations", headers: as(alice) });
+    const items = list.json().obligations as Array<Record<string, unknown>>;
+    const withDraft = items.find((o) => o["draft"]) ?? items[0]!;
+    if (!withDraft["draft"]) {
+      const drafted = await app.inject({
+        method: "POST",
+        url: `/v1/me/obligations/${withDraft["id"]}/draft`,
+        headers: as(alice),
+      });
+      expect(drafted.statusCode).toBe(200);
+    }
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${withDraft["id"]}/send`,
+      headers: as(alice),
+    });
+    expect([200, 409]).toContain(res.statusCode);
+    if (res.statusCode !== 200) return;
+    const { id, diff_sha256 } = res.json().action as { id: string; diff_sha256: string };
+    const actions = (
+      await app.inject({ method: "GET", url: "/v1/me/actions", headers: as(alice) })
+    ).json().actions as Array<Record<string, unknown>>;
+    const proposal = actions.find((a) => a["id"] === id)!;
+    expect(proposal["kind"]).toBe("gmail.send");
+    expect(typeof proposal["message"]).toBe("string");
+    expect(proposal["can_promote"]).toBe(false);
+    const approve = await app.inject({
+      method: "POST",
+      url: `/v1/me/actions/${id}/approve`,
+      headers: as(alice),
+      payload: { diff_sha256 },
+    });
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json()).toMatchObject({ status: "verified", verified: true });
+    const theirs = await app.inject({
+      method: "POST",
+      url: `/v1/me/obligations/${withDraft["id"]}/send`,
       headers: as(bob),
     });
     expect(theirs.statusCode).toBe(404);

@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
-import type {
-  OpportunityRecord,
-  SalesforceActivityWriter,
-  SalesforceOpportunityWriter,
+import {
+  readSentMessage,
+  sendGmailDraft,
+  type GmailSendConfig,
+  type OpportunityRecord,
+  type SalesforceActivityWriter,
+  type SalesforceOpportunityWriter,
 } from "@maman/connector-adapters";
 import {
   appendAuditEvent,
@@ -17,6 +20,9 @@ import {
   type ActionRow,
   type UserContext,
   recordCorrection,
+  getDraftForSend,
+  listUnsentDraftsPending,
+  matchDraftToSent,
 } from "@maman/db";
 import {
   promotionFor,
@@ -30,6 +36,7 @@ import {
   orgPolicySchema,
   type OrgPolicy,
 } from "@maman/policy-engine";
+import { decryptBody } from "./content.js";
 import { activeRules, stateIntent } from "./intents.js";
 import type { OpportunityOutput } from "@maman/model-provider";
 
@@ -55,6 +62,31 @@ import type { OpportunityOutput } from "@maman/model-provider";
 
 export const LOG_ACTIVITY = "salesforce.log_activity";
 export const UPDATE_OPPORTUNITY = "salesforce.update_opportunity";
+export const GMAIL_SEND = "gmail.send";
+
+/**
+ * The exact message a send would put out: where, what, and the text as a
+ * hash. The text itself stays in the drafts table, encrypted; the hash is
+ * what approval binds to, and what apply checks the draft against again.
+ * `situation` is the kind of item it answers, which is the shape a
+ * promotion covers: "my drafts for threads gone quiet", not "my drafts".
+ */
+export type SendDiff = {
+  kind: typeof GMAIL_SEND;
+  draft_id: string;
+  gmail_draft_id: string;
+  thread_id: string;
+  to: string;
+  contact_display_name: string;
+  subject: string;
+  body_sha256: string;
+  body_chars: number;
+  situation: "awaiting_you" | "awaiting_them" | "unsent_followup";
+};
+
+/** The shape of a send, by situation. A promotion covers one shape. */
+export const sendShape = (situation: SendDiff["situation"]): string =>
+  diffHash({ kind: GMAIL_SEND, situation });
 
 /** A field change read from the thread: what the record holds, what it will hold, and the sentence that says so. */
 export type FieldChange = { from: string | null; to: string; quote: string };
@@ -106,6 +138,8 @@ export type ActionDeps = {
   writer: SalesforceActivityWriter;
   /** Opportunity fields. Optional so a caller with only the activity writer still works. */
   opportunities?: SalesforceOpportunityWriter | undefined;
+  /** Sending mail, as the person. Absent → a send can be proposed and approved, never applied. */
+  gmail?: GmailSendConfig | undefined;
   orgPolicy: (organizationId: string) => Promise<OrgPolicy>;
   now: () => Date;
 };
@@ -253,6 +287,70 @@ export async function proposeOpportunityUpdate(
   });
 }
 
+/**
+ * Proposes sending a draft, as it is now. Refused when the draft was already
+ * sent, when the item it answers is no longer pending, or when the thread
+ * moved after the draft was written: a reply that arrived since deserves a
+ * new draft, not this one. One live proposal per draft.
+ */
+export async function proposeSend(
+  deps: ActionDeps,
+  ctx: UserContext,
+  input: { draft_id: string },
+): Promise<
+  | ActionRow
+  | {
+      ok: false;
+      reason:
+        "exists" | "not_allowed" | "not_found" | "already_sent" | "not_pending" | "thread_moved";
+    }
+> {
+  const draft = await getDraftForSend(deps.sql, ctx, input.draft_id);
+  if (!draft) return { ok: false, reason: "not_found" };
+  if (draft.matched_at || draft.sent_external_id) return { ok: false, reason: "already_sent" };
+  if (!draft.obligation_kind) return { ok: false, reason: "not_pending" };
+  if (Date.parse(draft.thread_last_message_at) > Date.parse(draft.created_at)) {
+    return { ok: false, reason: "thread_moved" };
+  }
+  // A declined or stale proposal may be made again. A failed one may not: a
+  // send that failed after the request left has an unknown result, and the
+  // only safe number of automatic retries for a send is none.
+  const existing = await findActionForMessage(deps.sql, ctx, GMAIL_SEND, draft.gmail_draft_id);
+  if (existing && !["declined", "stale"].includes(existing.status)) {
+    return { ok: false, reason: "exists" };
+  }
+  const policy = orgActionPolicy(await deps.orgPolicy(ctx.organizationId), GMAIL_SEND);
+  if (!policy.allowed) return { ok: false, reason: "not_allowed" };
+  const body = decryptBody(draft.body_ciphertext, deps.contentKey, ctx);
+  const diff: SendDiff = {
+    kind: GMAIL_SEND,
+    draft_id: draft.id,
+    gmail_draft_id: draft.gmail_draft_id,
+    thread_id: draft.thread_id,
+    to: draft.contact_address,
+    contact_display_name: draft.contact_display_name,
+    subject: draft.subject,
+    body_sha256: sha256(body),
+    body_chars: body.length,
+    situation: draft.obligation_kind,
+  };
+  return createAction(deps.sql, ctx, {
+    kind: GMAIL_SEND,
+    thread_id: draft.thread_id,
+    message_external_id: draft.gmail_draft_id,
+    diff,
+    diff_sha256: diffHash(diff),
+    shape_sha256: sendShape(draft.obligation_kind),
+    evidence: {
+      draft_id: draft.id,
+      obligation_id: draft.obligation_id,
+      thread_id: draft.thread_id,
+      drafted_at: draft.created_at,
+    },
+    idempotency_key: `${GMAIL_SEND}:${draft.gmail_draft_id}:${existing ? existing.id : "first"}`,
+  });
+}
+
 /** Approval is bound to the exact diff the person saw. Anything else is stale. */
 export async function approveAction(
   deps: ActionDeps,
@@ -331,6 +429,7 @@ export async function applyAction(
   if (!action) return { ok: false, action: null, reason: "not_found" };
   if (action.status !== "approved") return { ok: false, action, reason: "not_approved" };
   if (action.kind === UPDATE_OPPORTUNITY) return applyOpportunityUpdate(deps, ctx, action);
+  if (action.kind === GMAIL_SEND) return applySend(deps, ctx, action);
   const diff = action.diff as ActivityDiff;
   const audit = async (
     outcome: "success" | "failure",
@@ -599,6 +698,129 @@ async function applyOpportunityUpdate(
   }
 }
 
+/**
+ * Sends. Three things are checked again first, because a send cannot be
+ * taken back: the draft is still unsent, its text still hashes to what was
+ * approved, and the thread has not moved since it was written. Then one
+ * send, no retry, and a read-back of the message from Gmail before the
+ * action counts as done. There is no undo; the receipt says so.
+ */
+async function applySend(
+  deps: ActionDeps,
+  ctx: UserContext,
+  action: ActionRow,
+): Promise<ApplyResult> {
+  const diff = action.diff as SendDiff;
+  const audit = async (
+    outcome: "success" | "failure",
+    reason: string,
+    metadata: Record<string, string | number | boolean>,
+  ) =>
+    appendAuditEvent(
+      deps.sql,
+      { organizationId: ctx.organizationId },
+      {
+        organization_id: ctx.organizationId,
+        actor_type: action.approved_by === "promotion" ? "service" : "user",
+        actor_id: ctx.userId,
+        action: `action.${action.kind}`,
+        resource_type: "action",
+        resource_id: action.id,
+        outcome,
+        reason_code: reason,
+        metadata,
+      },
+    ).catch(() => undefined);
+  const stale = async (why: string) => {
+    const row = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
+      status: "stale",
+      error: why,
+    });
+    await audit("failure", "stale", { why });
+    return { ok: false as const, action: row ?? action, reason: "stale" as const };
+  };
+  if (!deps.gmail) {
+    const row = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
+      status: "failed",
+      error: "sending is not configured",
+    });
+    return { ok: false, action: row ?? action, reason: "provider" };
+  }
+  const draft = await getDraftForSend(deps.sql, ctx, diff.draft_id);
+  if (!draft) return stale("the draft is gone");
+  if (draft.matched_at || draft.sent_external_id) return stale("already sent");
+  const body = decryptBody(draft.body_ciphertext, deps.contentKey, ctx);
+  if (sha256(body) !== diff.body_sha256) return stale("the draft changed since you approved it");
+  if (Date.parse(draft.thread_last_message_at) > Date.parse(draft.created_at)) {
+    return stale("they wrote since this was drafted");
+  }
+  const key = { organization_id: ctx.organizationId, user_id: ctx.userId };
+  try {
+    const sent = await sendGmailDraft(deps.gmail, key, diff.gmail_draft_id);
+    const applied = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
+      status: "applied",
+      applied_at: deps.now().toISOString(),
+      external_id: sent.message_id,
+      revert: null,
+    });
+    // The read-back: the message exists in Gmail, on this thread, marked sent.
+    const back = await readSentMessage(deps.gmail, key, sent.message_id);
+    const problems: string[] = [];
+    if (!back) problems.push("message not found on read-back");
+    else {
+      if (!back.sent) problems.push("not marked sent");
+      if (back.thread_id && diff.thread_id && sent.thread_id && back.thread_id !== sent.thread_id) {
+        problems.push("on another thread");
+      }
+    }
+    if (problems.length > 0) {
+      // Gmail took the send; the read-back could not confirm it. The draft is
+      // treated as sent so it can never go out twice, and the failure is
+      // the person's to look at.
+      await matchDraftToSent(deps.sql, ctx, draft.id, {
+        external_id: sent.message_id,
+        sent_at: deps.now().toISOString(),
+        edit_ratio: 1,
+      });
+      const row = await transitionAction(deps.sql, ctx, action.id, ["applied"], {
+        status: "failed",
+        verification: { verified: false, problems },
+        error: `read-back disagreed: ${problems.join(", ")}`,
+      });
+      await audit("failure", "unverified", { problems: problems.join(",") });
+      return { ok: false, action: row ?? applied ?? action, reason: "unverified" };
+    }
+    // The draft is now a sent message, as written.
+    await matchDraftToSent(deps.sql, ctx, draft.id, {
+      external_id: sent.message_id,
+      sent_at: deps.now().toISOString(),
+      edit_ratio: 1,
+    });
+    const verified = await transitionAction(deps.sql, ctx, action.id, ["applied"], {
+      status: "verified",
+      verification: {
+        verified: true,
+        message_id: sent.message_id,
+        read_at: deps.now().toISOString(),
+      },
+      verified_at: deps.now().toISOString(),
+    });
+    await audit("success", "verified", {
+      message_id: sent.message_id,
+      approved_by: action.approved_by ?? "user",
+    });
+    return { ok: true, action: verified ?? applied ?? action, verified: true };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    const row = await transitionAction(deps.sql, ctx, action.id, ["approved", "applied"], {
+      status: "failed",
+      error: message,
+    });
+    await audit("failure", "provider_error", { error: message.slice(0, 200) });
+    return { ok: false, action: row ?? action, reason: "provider" };
+  }
+}
+
 /** Puts it back: deletes the task and reads back that it is gone. */
 export async function revertAction(
   deps: ActionDeps,
@@ -721,10 +943,17 @@ export async function promoteAction(
   if (!action) return { ok: false, reason: "not_found" };
   const policy = orgActionPolicy(await deps.orgPolicy(ctx.organizationId), action.kind);
   if (!policy.allowed || !policy.unattended) return { ok: false, reason: "not_allowed" };
+  const SEND_TEXT: Record<SendDiff["situation"], string> = {
+    awaiting_you: "Always send my reply when someone is waiting on me, without asking.",
+    awaiting_them: "Always send my follow-up when a thread has gone quiet, without asking.",
+    unsent_followup: "Always send my note after a meeting, without asking.",
+  };
   const text =
-    action.kind === UPDATE_OPPORTUNITY
-      ? "Always update the opportunity's next step and close date from my threads, without asking."
-      : "Always log the emails I send to Salesforce, without asking.";
+    action.kind === GMAIL_SEND
+      ? SEND_TEXT[(action.diff as SendDiff).situation]
+      : action.kind === UPDATE_OPPORTUNITY
+        ? "Always update the opportunity's next step and close date from my threads, without asking."
+        : "Always log the emails I send to Salesforce, without asking.";
   const view = await stateIntent(
     deps,
     ctx,
@@ -764,10 +993,12 @@ export type ActionView = {
   contact_display_name: string;
   /** Each field the write touches, before and after. Plain labels, ISO dates. */
   changes: Array<{
-    field: "next_step" | "close_date" | "subject" | "date";
+    field: "next_step" | "close_date" | "subject" | "date" | "to";
     from: string | null;
     to: string;
   }>;
+  /** For a send still proposed: the exact text that would go out. Null otherwise. */
+  message: string | null;
 };
 
 export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promise<ActionView[]> {
@@ -775,6 +1006,13 @@ export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promi
     listActions(deps.sql, ctx),
     deps.orgPolicy(ctx.organizationId),
   ]);
+  // The exact text of each send still waiting: the person approves what they read.
+  const messages = new Map<string, string>();
+  for (const r of rows) {
+    if (r.kind !== GMAIL_SEND || r.status !== "proposed") continue;
+    const draft = await getDraftForSend(deps.sql, ctx, (r.diff as SendDiff).draft_id);
+    if (draft) messages.set(r.id, decryptBody(draft.body_ciphertext, deps.contentKey, ctx));
+  }
   return rows.map((r) => {
     const base = {
       id: r.id,
@@ -789,6 +1027,22 @@ export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promi
       can_revert: ["verified", "applied", "failed"].includes(r.status) && r.revert !== null,
       can_promote: orgActionPolicy(policy, r.kind).unattended,
     };
+    if (r.kind === GMAIL_SEND) {
+      const d = r.diff as SendDiff;
+      return {
+        ...base,
+        summary: `Send "${d.subject}" to ${d.contact_display_name}`,
+        detail: "The draft as it is in Gmail now. Nothing else is added.",
+        quotes: [],
+        record: d.subject,
+        contact_display_name: d.contact_display_name,
+        changes: [
+          { field: "to" as const, from: null, to: d.to },
+          { field: "subject" as const, from: null, to: d.subject },
+        ],
+        message: r.status === "proposed" ? (messages.get(r.id) ?? null) : null,
+      };
+    }
     if (r.kind === UPDATE_OPPORTUNITY) {
       const d = r.diff as OpportunityDiff;
       const parts: string[] = [];
@@ -801,6 +1055,7 @@ export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promi
         quotes: Object.values(d.changes).map((c) => c.quote),
         record: d.opportunity_name,
         contact_display_name: d.contact_display_name,
+        message: null,
         changes: [
           ...(d.changes.next_step
             ? [
@@ -831,6 +1086,7 @@ export async function listActionViews(deps: ActionDeps, ctx: UserContext): Promi
       quotes: [],
       record: d.subject,
       contact_display_name: d.contact_display_name,
+      message: null,
       changes: [
         { field: "subject" as const, from: null, to: d.subject },
         { field: "date" as const, from: null, to: d.activity_date },
@@ -935,4 +1191,46 @@ export function orgPolicyResolver(sql: Sql): (organizationId: string) => Promise
     const parsed = orgPolicySchema.safeParse(latest.policy);
     return parsed.success ? parsed.data : DEFAULT_ORG_POLICY;
   };
+}
+
+/**
+ * IN THE SWEEP. Every unsent draft whose item is still pending is looked at.
+ * A send happens without asking only when all four hold: the organization
+ * allows unattended sends, the person promoted this exact shape (the
+ * situation the draft answers), the draft's text is still what it was, and
+ * the thread has not moved. Everything else stays a draft in Gmail.
+ */
+export async function autoSends(
+  deps: ActionDeps,
+  ctx: UserContext,
+): Promise<{ considered: number; sent: number; failed: number }> {
+  const result = { considered: 0, sent: 0, failed: 0 };
+  if (!deps.gmail) return result;
+  const policy = orgActionPolicy(await deps.orgPolicy(ctx.organizationId), GMAIL_SEND);
+  if (!policy.unattended) return result;
+  const rules = await activeRules(deps.sql, ctx);
+  const drafts = await listUnsentDraftsPending(deps.sql, ctx);
+  for (const d of drafts) {
+    if (!d.obligation_kind) continue;
+    result.considered += 1;
+    const promotion = promotionFor(
+      rules,
+      { kind: GMAIL_SEND, shape_sha256: sendShape(d.obligation_kind) },
+      {
+        address: d.contact_address,
+        display_name: d.contact_display_name,
+        account_name: d.contact_account_name,
+      },
+      d.obligation_kind,
+    );
+    if (!promotion) continue;
+    const proposed = await proposeSend(deps, ctx, { draft_id: d.id });
+    if ("ok" in proposed) continue;
+    const approved = await approveAction(deps, ctx, proposed.id, proposed.diff_sha256, "promotion");
+    if (!approved.ok) continue;
+    const applied = await applyAction(deps, ctx, proposed.id);
+    if (applied.ok) result.sent += 1;
+    else result.failed += 1;
+  }
+  return result;
 }

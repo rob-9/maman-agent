@@ -146,3 +146,10 @@ export async function keepIntentAction(id: string): Promise<void> {
   revalidatePath("/");
   if (!res.ok) throw new Error(`could not keep that (${res.status})`);
 }
+
+/** "Send" on a card: the draft is shown exactly as it is, for the person to approve. */
+export async function proposeSendAction(id: string): Promise<void> {
+  const res = await me.proposeSend(id);
+  revalidatePath("/");
+  if (!res.ok) throw new Error(`could not propose sending (${res.detail ?? res.status})`);
+}

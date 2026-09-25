@@ -56,6 +56,11 @@ import {
   revertAction,
   sentFromMatchedDrafts,
   proposeOpportunityUpdate,
+  proposeSend,
+  autoSends,
+  GMAIL_SEND,
+  sendShape,
+  type SendDiff,
 } from "../../src/actions.js";
 import { runOpportunityPass } from "../../src/opportunity-pass.js";
 import { deriveEvents, runEventStep } from "../../src/events.js";
@@ -74,6 +79,7 @@ import {
   loadDetectionInputs,
   recordWorkflowEvents,
   replacePendingObligations,
+  getDraftForSend,
   setObligationOutcome,
   upsertRoutineCandidates,
   upsertSyncedThreads,
@@ -2543,5 +2549,314 @@ describe("the draft learns from what the person sends", () => {
     expect("id" in again).toBe(true);
     if ("id" in again)
       expect(Object.keys((again.diff as { changes: object }).changes)).toEqual(["next_step"]);
+  });
+});
+
+describe("sending, behind a per-person promotion", () => {
+  const eve = uuidv7();
+  const ctx = { organizationId: orgId, userId: eve };
+  const real = Date.now();
+  const at = (offsetMs: number) => new Date(real + offsetMs).toISOString();
+  let connId = "";
+  /** A Gmail that creates drafts, sends by draft id, and answers the read-back. */
+  const sentIds = new Set<string>();
+  const sendCalls: string[] = [];
+  let sendStatus = 200;
+  let readBackSent = true;
+  const gmail = async (req: HttpRequest): Promise<HttpResponse> => {
+    const url = new URL(req.url);
+    if (req.method === "POST" && url.pathname.endsWith("/drafts/send")) {
+      const { id } = JSON.parse(req.body!) as { id: string };
+      sendCalls.push(id);
+      if (sendStatus !== 200) return { status: sendStatus, headers: {}, body: {} };
+      sentIds.add(`sent-${id}`);
+      return {
+        status: 200,
+        headers: {},
+        body: { id: `sent-${id}`, threadId: "t", labelIds: ["SENT"] },
+      };
+    }
+    const m = url.pathname.match(/\/messages\/([^/]+)$/);
+    if (m) {
+      const id = decodeURIComponent(m[1]!);
+      return sentIds.has(id)
+        ? {
+            status: 200,
+            headers: {},
+            body: { id, threadId: "t", labelIds: readBackSent ? ["SENT"] : ["DRAFT"] },
+          }
+        : { status: 404, headers: {}, body: {} };
+    }
+    return transport(req);
+  };
+  let policy = DEFAULT_ORG_POLICY;
+  const sdeps = () => ({
+    sql: client.sql,
+    contentKey: master,
+    writer: {} as never,
+    orgPolicy: async () => policy,
+    gmail: {
+      credentials: createUserVaultCredentialProvider({
+        sql: client.sql,
+        masterKey: master,
+        transport: async () => ({ status: 500, body: {} }),
+        clientCredentials: () => ({ client_id: "x" }),
+      }),
+      transport: gmail,
+    },
+    now: () => NOW,
+  });
+  const ideps = () => ({ sql: client.sql, contentKey: master, now: () => NOW });
+  const threadIds: string[] = [];
+  const draftIds: string[] = [];
+
+  async function draftOn(i: number, kind: "awaiting_them" | "awaiting_you" = "awaiting_them") {
+    await upsertSyncedThreads(client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        {
+          external_id: `s${i}`,
+          subject: `Send ${i}`,
+          last_message_at: at(-3 * 86_400_000),
+          last_direction: kind === "awaiting_them" ? "outbound" : "inbound",
+          message_count: 1,
+          contact: { address: `p${i}@client.com`, display_name: `Person ${i}` },
+        },
+      ],
+    });
+    const { threads } = await loadDetectionInputs(client.sql, ctx);
+    const t = threads.find((x) => x.subject === `Send ${i}`)!;
+    threadIds[i] = t.thread_id;
+    // One pending item for this thread, without touching the others.
+    const obId = uuidv7();
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) => tx`
+        INSERT INTO obligations (id, organization_id, owner_user_id, thread_id, contact_id, kind, rank, reason, outcome, detected_at)
+        VALUES (${obId}, ${orgId}, ${eve}, ${t.thread_id}, ${t.contact_id}, ${kind}, 30,
+                ${JSON.stringify({ kind, days_elapsed: 6, threshold_days: 5, last_direction: "outbound", message_count: 1, has_open_deal: null })}::jsonb,
+                'pending', ${NOW.toISOString()})
+      `,
+    );
+    const ob = { id: obId };
+    const d = await recordDraftRow(client.sql, ctx, {
+      obligation_id: ob.id,
+      thread_id: t.thread_id,
+      gmail_draft_id: `gd-${i}`,
+      subject: `Send ${i}`,
+      body_ciphertext: encryptBody(`Hi Person ${i},\n\nJust checking in.\n\nEve`, master, ctx),
+      body_chars: 30,
+      composer: "deterministic",
+      mode: "auto",
+    });
+    draftIds[i] = d.id;
+    return { thread_id: t.thread_id, draft_id: d.id, obligation_id: ob.id };
+  }
+
+  it("a draft is proposed exactly as it is: the person sees the text; approve sends once and the message is read back", async () => {
+    await seedUser(eve, "eve@co.example");
+    connId = await linkGmail(eve, "eve@co.example");
+    const one = await draftOn(1);
+    const proposed = await proposeSend(sdeps(), ctx, { draft_id: one.draft_id });
+    expect("id" in proposed).toBe(true);
+    if (!("id" in proposed)) return;
+    expect(proposed.kind).toBe(GMAIL_SEND);
+    const view = (await listActionViews(sdeps(), ctx)).find((v) => v.id === proposed.id)!;
+    expect(view.summary).toBe('Send "Send 1" to Person 1');
+    expect(view.message).toContain("Just checking in.");
+    expect(view.changes).toEqual([
+      { field: "to", from: null, to: "p1@client.com" },
+      { field: "subject", from: null, to: "Send 1" },
+    ]);
+    expect(view.can_promote).toBe(false);
+    expect(view.can_revert).toBe(false);
+    // Proposed once.
+    expect(await proposeSend(sdeps(), ctx, { draft_id: one.draft_id })).toEqual({
+      ok: false,
+      reason: "exists",
+    });
+    // Nothing has gone out yet.
+    expect(sendCalls).toEqual([]);
+    await approveAction(sdeps(), ctx, proposed.id, proposed.diff_sha256);
+    const applied = await applyAction(sdeps(), ctx, proposed.id);
+    expect(applied.ok).toBe(true);
+    expect(applied.action?.status).toBe("verified");
+    expect(sendCalls).toEqual(["gd-1"]);
+    // The draft is now a sent message, as written; a second send is refused.
+    const sentView = (await listActionViews(sdeps(), ctx)).find((v) => v.id === proposed.id)!;
+    expect(sentView.message).toBeNull();
+    expect(await proposeSend(sdeps(), ctx, { draft_id: one.draft_id })).toEqual({
+      ok: false,
+      reason: "already_sent",
+    });
+    expect((await verifyAuditChain(client.sql, { organizationId: orgId })).valid).toBe(true);
+  });
+
+  it("a draft edited after approval, or a thread that moved since, is never sent; a read-back that disagrees is a failure", async () => {
+    const two = await draftOn(2);
+    const p2 = await proposeSend(sdeps(), ctx, { draft_id: two.draft_id });
+    if (!("id" in p2)) throw new Error("not proposed");
+    await approveAction(sdeps(), ctx, p2.id, p2.diff_sha256);
+    // The person edits the draft in Gmail before the send runs.
+    await withUser(
+      client.sql,
+      ctx,
+      (tx) =>
+        tx`UPDATE drafts SET body_ciphertext = ${encryptBody("Hi Person 2,\n\nSomething else.\n\nEve", master, ctx)} WHERE id = ${two.draft_id}`,
+    );
+    const edited = await applyAction(sdeps(), ctx, p2.id);
+    expect(edited).toMatchObject({ ok: false, reason: "stale" });
+    expect(edited.action?.error).toContain("changed since you approved");
+    expect(sendCalls).toEqual(["gd-1"]);
+
+    const three = await draftOn(3);
+    // They reply after the draft was written.
+    await upsertSyncedThreads(client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        {
+          external_id: "s3",
+          subject: "Send 3",
+          last_message_at: at(60_000),
+          last_direction: "inbound",
+          message_count: 2,
+          contact: { address: "p3@client.com", display_name: "Person 3" },
+        },
+      ],
+    });
+    expect(await proposeSend(sdeps(), ctx, { draft_id: three.draft_id })).toEqual({
+      ok: false,
+      reason: "thread_moved",
+    });
+
+    const four = await draftOn(4);
+    const p4 = await proposeSend(sdeps(), ctx, { draft_id: four.draft_id });
+    if (!("id" in p4)) throw new Error("not proposed");
+    await approveAction(sdeps(), ctx, p4.id, p4.diff_sha256);
+    readBackSent = false;
+    const unverified = await applyAction(sdeps(), ctx, p4.id);
+    readBackSent = true;
+    expect(unverified).toMatchObject({ ok: false, reason: "unverified" });
+    expect(unverified.action?.error).toContain("not marked sent");
+    // Gmail took it. It is treated as sent and can never go out twice.
+    expect(await proposeSend(sdeps(), ctx, { draft_id: four.draft_id })).toEqual({
+      ok: false,
+      reason: "already_sent",
+    });
+  });
+
+  it("'Always' is refused while the organization keeps the gate shut; opened and promoted, the sweep sends the same shape alone and nothing else", async () => {
+    const five = await draftOn(5);
+    const p5 = await proposeSend(sdeps(), ctx, { draft_id: five.draft_id });
+    if (!("id" in p5)) throw new Error("not proposed");
+    expect(await promoteAction(sdeps(), ctx, p5.id)).toEqual({ ok: false, reason: "not_allowed" });
+    expect(await autoSends(sdeps(), ctx)).toEqual({ considered: 0, sent: 0, failed: 0 });
+
+    policy = orgPolicySchema.parse({ ...DEFAULT_ORG_POLICY, allow_unattended_send: true });
+    expect((await listActionViews(sdeps(), ctx)).find((v) => v.id === p5.id)!.can_promote).toBe(
+      true,
+    );
+    expect((await promoteAction(sdeps(), ctx, p5.id)).ok).toBe(true);
+    await declineAction(sdeps(), ctx, p5.id);
+    const promoted = (await listIntentViews(ideps(), ctx)).find((v) =>
+      v.text.startsWith("Always send my follow-up"),
+    )!;
+    expect(promoted).toBeDefined();
+    // A gone-quiet draft goes; a reply-owed draft is a different shape and waits.
+    const six = await draftOn(6, "awaiting_you");
+    const before = sendCalls.length;
+    // Two gone-quiet drafts go: the edited one (its stale proposal is made
+    // again, for the text as it is now) and the promoted one. The thread that
+    // moved, the failed send and the reply-owed draft do not.
+    const swept = await autoSends(sdeps(), ctx);
+    expect(swept).toMatchObject({ sent: 2, failed: 0 });
+    expect(sendCalls.slice(before)).toEqual(["gd-2", "gd-5"]);
+    // The reply-owed draft was not sent and not proposed: it waits for the
+    // person, who can still propose it by hand.
+    expect(sendCalls).not.toContain("gd-6");
+    const sixProposal = await proposeSend(sdeps(), ctx, { draft_id: six.draft_id });
+    expect("id" in sixProposal && sixProposal.status === "proposed").toBe(true);
+    // Not twice.
+    expect(await autoSends(sdeps(), ctx)).toMatchObject({ sent: 0 });
+    const receipt = (await listActionViews(sdeps(), ctx)).find(
+      (v) => v.record === "Send 5" && v.status === "verified",
+    )!;
+    expect(receipt.approved_by).toBe("promotion");
+    policy = DEFAULT_ORG_POLICY;
+  });
+
+  it("a send that fails before Gmail takes it is not retried by anyone: not proposed again, not swept", async () => {
+    policy = orgPolicySchema.parse({ ...DEFAULT_ORG_POLICY, allow_unattended_send: true });
+    const seven = await draftOn(7);
+    const p7 = await proposeSend(sdeps(), ctx, { draft_id: seven.draft_id });
+    if (!("id" in p7)) throw new Error("not proposed");
+    await approveAction(sdeps(), ctx, p7.id, p7.diff_sha256);
+    sendStatus = 500;
+    const failed = await applyAction(sdeps(), ctx, p7.id);
+    sendStatus = 200;
+    expect(failed).toMatchObject({ ok: false, reason: "provider" });
+    // The result is unknown from here on. No proposal, no promotion, sends it again.
+    expect(await proposeSend(sdeps(), ctx, { draft_id: seven.draft_id })).toEqual({
+      ok: false,
+      reason: "exists",
+    });
+    const before = sendCalls.length;
+    await autoSends(sdeps(), ctx);
+    expect(sendCalls.slice(before)).not.toContain("gd-7");
+    policy = DEFAULT_ORG_POLICY;
+  });
+
+  it("a colleague cannot send the person's draft", async () => {
+    expect(
+      await proposeSend(
+        sdeps(),
+        { organizationId: orgId, userId: bob },
+        { draft_id: draftIds[1]! },
+      ),
+    ).toEqual({ ok: false, reason: "not_found" });
+  });
+
+  it("the sweep rewriting the pending item does not lose the draft: its situation is the thread's current item", async () => {
+    const eight = await draftOn(8, "awaiting_them");
+    const t = (await loadDetectionInputs(client.sql, ctx)).threads.find(
+      (x) => x.thread_id === eight.thread_id,
+    )!;
+    // The sweep replaces every pending row each pass; the draft's own link
+    // is set to null when its row goes. The draft is still the answer to
+    // whatever is pending on that thread now.
+    await replacePendingObligations(client.sql, ctx, [], NOW);
+    const orphan = await getDraftForSend(client.sql, ctx, eight.draft_id);
+    expect(orphan?.obligation_id).toBeNull();
+    expect(await proposeSend(sdeps(), ctx, { draft_id: eight.draft_id })).toEqual({
+      ok: false,
+      reason: "not_pending",
+    });
+    await replacePendingObligations(
+      client.sql,
+      ctx,
+      [
+        {
+          thread_id: eight.thread_id,
+          contact_id: t.contact_id,
+          kind: "unsent_followup",
+          rank: 30,
+          reason: {
+            kind: "unsent_followup",
+            days_elapsed: 6,
+            threshold_days: 5,
+            last_direction: "outbound",
+            message_count: 1,
+            has_open_deal: null,
+          },
+        },
+      ],
+      NOW,
+    );
+    const proposed = await proposeSend(sdeps(), ctx, { draft_id: eight.draft_id });
+    expect("id" in proposed).toBe(true);
+    if (!("id" in proposed)) return;
+    expect((proposed.diff as SendDiff).situation).toBe("unsent_followup");
+    expect(proposed.shape_sha256).toBe(sendShape("unsent_followup"));
   });
 });

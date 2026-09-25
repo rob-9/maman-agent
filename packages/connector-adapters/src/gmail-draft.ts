@@ -8,14 +8,14 @@ import {
 } from "./credentials.js";
 
 /**
- * Gmail draft creation — the ONLY write this connector performs.
+ * Gmail draft creation.
  *
  * A draft is reversible and human-reviewed by construction: it lands in the
  * person's Drafts folder and nothing happens until THEY open it and press
  * Send. That is why it needs none of the verification machinery a CRM write
- * does, and why it is the first write in the product. The scope is
- * `gmail.compose`; `gmail.send` is never requested, so even a bug here cannot
- * send mail.
+ * does, and why it is the first write in the product. Sending exists too,
+ * in gmail-send.ts, behind the action ladder and a per-person promotion the
+ * organization must allow; this file never sends.
  *
  * The message builder is pure and tested on its own; the HTTP half mirrors
  * gmail.ts.

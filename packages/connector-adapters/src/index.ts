@@ -100,7 +100,17 @@ export {
 } from "./salesforce-opportunity.js";
 export {
   createDemoWorld,
+  fileStore,
+  defaultDemoWorldStateFile,
   DEMO_SALESFORCE_INSTANCE,
   type DemoWorld,
+  type DemoWorldStore,
   type TokenTransportLike,
 } from "./demo-world.js";
+export {
+  readSentMessage,
+  sendGmailDraft,
+  type GmailSendConfig,
+  type SentMessage,
+  type SentReadback,
+} from "./gmail-send.js";

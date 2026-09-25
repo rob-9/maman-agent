@@ -1,3 +1,6 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { HttpRequest, HttpResponse, HttpTransport } from "./http.js";
 
 /**
@@ -13,7 +16,48 @@ import type { HttpRequest, HttpResponse, HttpTransport } from "./http.js";
  *
  * Nothing in the product is demo-only. This is the demo implementation of
  * the connectors, as the deterministic provider is of the model.
+ *
+ * Two processes run the product (the API and the worker), and both must see
+ * the same world: a draft the worker's sweep made is what the person sends
+ * from the API. So what the product writes here (drafts, sent messages,
+ * tasks, opportunity fields) is kept in a store the processes share, read
+ * before every request and written after every write. The scripted story
+ * itself is never stored; it is rebuilt from the clock each time.
  */
+
+/** Where the world keeps what the product wrote. Fictional data only. */
+export type DemoWorldStore = {
+  load: () => string | null;
+  save: (text: string) => void;
+};
+
+/** A store on disk, so the API and the worker share one world. */
+export function fileStore(path: string): DemoWorldStore {
+  return {
+    load: () => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    save: (text) => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, text, "utf8");
+    },
+  };
+}
+
+/** The default place for the shared file when none is configured. */
+export const defaultDemoWorldStateFile = (): string => join(tmpdir(), "maman-demo-world.json");
+
+type Snapshot = {
+  schema_version: 1;
+  drafts: Array<{ id: string; thread_id: string | null; raw: string; sent_message_id?: string }>;
+  sent: Array<{ thread_id: string; message: Msg }>;
+  tasks: Array<Record<string, unknown>>;
+  opportunities: Array<Record<string, unknown>>;
+};
 
 export type TokenTransportLike = (
   tokenEndpoint: string,
@@ -29,7 +73,7 @@ export type DemoWorld = {
   token: TokenTransportLike;
   /** What the world holds now, for tests and for a curious reader. */
   state: () => {
-    drafts: Array<{ id: string; thread_id: string | null }>;
+    drafts: Array<{ id: string; thread_id: string | null; sent: boolean }>;
     tasks: Array<Record<string, unknown>>;
     opportunities: Array<Record<string, unknown>>;
   };
@@ -64,7 +108,9 @@ type Party = {
   };
 };
 
-export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}): DemoWorld {
+export function createDemoWorld(
+  opts: { now?: () => Date; self?: string; store?: DemoWorldStore } = {},
+): DemoWorld {
   const now = opts.now ?? (() => new Date());
   const self = opts.self ?? "alex@acme-sales.example";
   const selfName = "Alex";
@@ -351,21 +397,66 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
   });
 
   // ---- mutable state: what the product writes ----
-  const drafts: Array<{ id: string; thread_id: string | null; raw: string }> = [];
+  const drafts: Array<{
+    id: string;
+    thread_id: string | null;
+    raw: string;
+    sent_message_id?: string;
+  }> = [];
+  const sentMessages: Array<{ thread_id: string; message: Msg }> = [];
   const tasks = new Map<string, Record<string, unknown>>();
   const opportunities = new Map<string, Record<string, unknown>>();
-  for (const p of Object.values(parties)) {
-    if (!p.opportunity) continue;
-    opportunities.set(p.opportunity.id, {
-      Id: p.opportunity.id,
-      Name: p.opportunity.name,
-      StageName: p.opportunity.stage,
-      NextStep: p.opportunity.next_step,
-      CloseDate: p.opportunity.close_date,
-      IsClosed: false,
-      Amount: p.opportunity.amount,
-    });
-  }
+  const seedOpportunities = () => {
+    opportunities.clear();
+    for (const p of Object.values(parties)) {
+      if (!p.opportunity) continue;
+      opportunities.set(p.opportunity.id, {
+        Id: p.opportunity.id,
+        Name: p.opportunity.name,
+        StageName: p.opportunity.stage,
+        NextStep: p.opportunity.next_step,
+        CloseDate: p.opportunity.close_date,
+        IsClosed: false,
+        Amount: p.opportunity.amount,
+      });
+    }
+  };
+  seedOpportunities();
+  // The story's own messages, so a restore can put the sent ones back on top.
+  const baseMessages = new Map(threads.map((t) => [t.id, [...t.messages]]));
+
+  /** Read what the product wrote, from the shared store, before answering. */
+  const restore = () => {
+    if (!opts.store) return;
+    const text = opts.store.load();
+    if (!text) return;
+    const snap = JSON.parse(text) as Snapshot;
+    if (snap.schema_version !== 1) return;
+    drafts.splice(0, drafts.length, ...snap.drafts);
+    sentMessages.splice(0, sentMessages.length, ...snap.sent);
+    tasks.clear();
+    for (const t of snap.tasks) tasks.set(String(t["Id"]), t);
+    seedOpportunities();
+    for (const o of snap.opportunities) opportunities.set(String(o["Id"]), o);
+    for (const t of threads) {
+      t.messages = [
+        ...(baseMessages.get(t.id) ?? []),
+        ...sentMessages.filter((x) => x.thread_id === t.id).map((x) => x.message),
+      ];
+    }
+  };
+  /** Write what the product wrote, after every write. */
+  const persist = () => {
+    if (!opts.store) return;
+    const snap: Snapshot = {
+      schema_version: 1,
+      drafts,
+      sent: sentMessages,
+      tasks: [...tasks.values()],
+      opportunities: [...opportunities.values()],
+    };
+    opts.store.save(JSON.stringify(snap));
+  };
 
   const json = (status: number, body: unknown): HttpResponse => ({ status, headers: {}, body });
   const historyOf = (t: Thread) => `h-${t.id}-${t.messages.length}`;
@@ -413,6 +504,7 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
   const quoted = (q: string) => [...q.matchAll(/'([^']*)'/g)].map((m) => m[1]!);
 
   const transport: HttpTransport = async (req: HttpRequest) => {
+    restore();
     const url = new URL(req.url);
     const path = url.pathname;
     // ---- Google ----
@@ -427,6 +519,38 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
       if (path.endsWith("/threads")) {
         return json(200, { threads: threads.map((t) => ({ id: t.id, historyId: historyOf(t) })) });
       }
+      if (req.method === "POST" && path.endsWith("/drafts/send")) {
+        const body = JSON.parse(req.body ?? "{}") as { id?: string };
+        const d = drafts.find((x) => x.id === body.id);
+        if (!d) return json(404, { error: { message: "draft not found" } });
+        if (d.sent_message_id) return json(400, { error: { message: "already sent" } });
+        // The draft becomes a message on its thread, as it would in Gmail.
+        const raw = Buffer.from(d.raw, "base64url").toString("utf8");
+        const sep = raw.indexOf("\r\n\r\n");
+        const headers = sep >= 0 ? raw.slice(0, sep) : "";
+        const text = sep >= 0 ? raw.slice(sep + 4) : raw;
+        const to = /^To: (.*)$/m.exec(headers)?.[1] ?? "";
+        const subject = /^Subject: (.*)$/m.exec(headers)?.[1] ?? "";
+        const t = threads.find((x) => x.id === d.thread_id);
+        const sentAt = now().getTime();
+        // Named after the draft, not counted, so every process agrees on it.
+        const message: Msg = { ...msg(me, to, sentAt, subject, text), id: `sent-${d.id}` };
+        if (t) {
+          t.messages.push(message);
+          sentMessages.push({ thread_id: t.id, message });
+        }
+        d.sent_message_id = message.id;
+        persist();
+        return json(200, { id: message.id, threadId: d.thread_id, labelIds: ["SENT"] });
+      }
+      const sent = path.match(/\/messages\/([^/]+)$/);
+      if (sent) {
+        const id = decodeURIComponent(sent[1]!);
+        const d = drafts.find((x) => x.sent_message_id === id);
+        return d
+          ? json(200, { id, threadId: d.thread_id, labelIds: ["SENT"] })
+          : json(404, { error: { message: "not found" } });
+      }
       if (req.method === "POST" && path.endsWith("/drafts")) {
         const body = JSON.parse(req.body ?? "{}") as {
           message?: { raw?: string; threadId?: string };
@@ -437,6 +561,7 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
           thread_id: body.message?.threadId ?? null,
           raw: body.message?.raw ?? "",
         });
+        persist();
         return json(200, { id, message: { id: `${id}-msg`, threadId: body.message?.threadId } });
       }
       const m = path.match(/\/threads\/([^/]+)$/);
@@ -488,6 +613,7 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
         const body = JSON.parse(req.body ?? "{}") as Record<string, unknown>;
         const id = `00T${String(tasks.size + 1).padStart(5, "0")}`;
         tasks.set(id, { Id: id, ...body });
+        persist();
         return json(201, { id, success: true });
       }
       const task = path.match(/\/sobjects\/Task\/([^/]+)$/);
@@ -497,6 +623,7 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
           return tasks.has(id) ? json(200, tasks.get(id)) : json(404, [{ errorCode: "NOT_FOUND" }]);
         if (req.method === "DELETE") {
           const had = tasks.delete(id);
+          persist();
           return had ? json(204, "") : json(404, [{ errorCode: "NOT_FOUND" }]);
         }
       }
@@ -509,6 +636,7 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
         if (req.method === "PATCH") {
           const body = JSON.parse(req.body ?? "{}") as Record<string, unknown>;
           for (const [k, v] of Object.entries(body)) row[k] = v;
+          persist();
           return json(204, "");
         }
       }
@@ -535,7 +663,8 @@ export function createDemoWorld(opts: { now?: () => Date; self?: string } = {}):
     transport,
     token,
     state: () => ({
-      drafts: drafts.map((d) => ({ id: d.id, thread_id: d.thread_id })),
+      ...(restore(), {}),
+      drafts: drafts.map((d) => ({ id: d.id, thread_id: d.thread_id, sent: !!d.sent_message_id })),
       tasks: [...tasks.values()],
       opportunities: [...opportunities.values()],
     }),

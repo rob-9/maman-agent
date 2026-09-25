@@ -43,9 +43,19 @@ describe("capability catalog (v1)", () => {
     }
   });
 
-  it("NEVER contains send, delete, or payment capabilities", () => {
+  it("NEVER contains delete, payment, or transfer capabilities", () => {
     const ids = CAPABILITIES.map((c) => c.id).join(" ");
-    expect(ids).not.toMatch(/send|delete|payment|purchase|transfer/);
+    expect(ids).not.toMatch(/delete|payment|purchase|transfer/);
+  });
+
+  it("the only send is the gated draft send: high risk, never retried, not reversible", () => {
+    const sends = CAPABILITIES.filter((c) => /send/.test(c.id));
+    expect(sends.map((c) => c.id)).toEqual(["gmail.send_draft"]);
+    const send = sends[0]!;
+    expect(send.risk_level).toBe("high");
+    expect(send.retry_class).toBe("unsafe");
+    expect(send.is_idempotent).toBe(false);
+    expect(send.reversible).toBe(false);
   });
 
   it("every write-capable capability also supports propose_write", () => {

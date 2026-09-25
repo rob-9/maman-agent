@@ -5,8 +5,10 @@ import type { CapabilityRiskLevel } from "@maman/contracts";
  * at M7 (demo) and M8 (real); this metadata layer is what the pattern engine
  * (feasibility), compiler, and policy engine reason over.
  *
- * NOTE deliberate absences: no gmail.send, no deletion, no payment — those
- * capabilities do not exist in v1 at all.
+ * NOTE deliberate absences: no deletion, no payment, no transfer. Those do
+ * not exist at all. The one send (gmail.send_draft) is high risk, never
+ * retried and not reversible; the action policy keeps it behind a
+ * per-person promotion the organization must allow.
  */
 
 export type CapabilityMode = "read" | "propose_write" | "write";
@@ -114,7 +116,7 @@ export const CAPABILITIES: CapabilityMetadata[] = [
     "medium",
     { required_scopes: ["spreadsheets"], retry_class: "conditional", is_idempotent: false },
   ),
-  // Gmail (metadata + drafts ONLY — no send capability exists)
+  // Gmail (metadata, drafts, and one gated send; see below)
   cap("gmail.search_metadata", "gmail", "Search Gmail metadata", ["read"], "low", {
     required_scopes: ["gmail.metadata"],
   }),
@@ -129,6 +131,15 @@ export const CAPABILITIES: CapabilityMetadata[] = [
   cap("gmail.update_draft", "gmail", "Update a Gmail draft", ["propose_write", "write"], "medium", {
     required_scopes: ["gmail.compose"],
     retry_class: "conditional",
+  }),
+  // Sending: the one write that cannot be undone. High risk, not idempotent,
+  // never retried. It exists so a promoted routine can finish; every send
+  // still goes through the action ladder with the exact text approved.
+  cap("gmail.send_draft", "gmail", "Send a Gmail draft", ["propose_write", "write"], "high", {
+    required_scopes: ["gmail.compose"],
+    is_idempotent: false,
+    retry_class: "unsafe",
+    reversible: false,
   }),
   // Calendar (drafts only)
   cap("google_calendar.list_events", "google_calendar", "List calendar events", ["read"], "low", {
@@ -267,7 +278,8 @@ export function capabilitiesForToken(token: string): string[] {
   }
   // CONNECTOR EVENTS (the event stream, derived from what a mailbox, a
   // calendar and a CRM already hold). A thread updated by the person is a
-  // reply they wrote: the helper drafts it, never sends. A thread updated by
+  // reply they wrote: the helper drafts it; sending is a separate gated
+  // action, never a compiled step. A thread updated by
   // the other side is something that arrived: the helper reads it. Without
   // these, every mail step scored as an unmapped UI write and no routine
   // from a mailbox could ever clear the feasibility bar.

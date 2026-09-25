@@ -99,10 +99,11 @@ export type ActionView = {
   record: string;
   contact_display_name: string;
   changes: Array<{
-    field: "next_step" | "close_date" | "subject" | "date";
+    field: "next_step" | "close_date" | "subject" | "date" | "to";
     from: string | null;
     to: string;
   }>;
+  message: string | null;
 };
 
 /** A routine the agent found in what the person did. */
@@ -178,6 +179,11 @@ export const me = {
     call<{ result: { proposed: number; nothing_to_change: number } }>(
       "POST",
       `/v1/me/obligations/${obligationId}/update-crm`,
+    ),
+  proposeSend: (obligationId: string) =>
+    call<{ action: { id: string; diff_sha256: string } }>(
+      "POST",
+      `/v1/me/obligations/${obligationId}/send`,
     ),
   proposeLog: (obligationId: string) =>
     call<{ action: { id: string; diff_sha256: string } }>(

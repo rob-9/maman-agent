@@ -50,6 +50,11 @@ export { runPredraft, type PredraftDeps, type PredraftResult } from "./predraft.
 export {
   LOG_ACTIVITY,
   UPDATE_OPPORTUNITY,
+  GMAIL_SEND,
+  proposeSend,
+  autoSends,
+  sendShape,
+  type SendDiff,
   applyAction,
   proposeOpportunityUpdate,
   approveAction,

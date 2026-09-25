@@ -40,7 +40,7 @@ export default async function ConnectionsPage({ searchParams }: { searchParams: 
         <Integration
           mark={<GmailMark size={26} />}
           name="Google"
-          description="Gmail and Calendar. Your agent reads your mail and meetings, and writes drafts. It cannot send."
+          description="Gmail and Calendar. Your agent reads your mail and meetings and writes drafts. It sends only what you approve, or what you told it to always send."
           presentation={describeGmail(gmail)}
           action={
             gmail && gmail.status === "active" ? (

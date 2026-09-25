@@ -1,6 +1,8 @@
 /**
  * OAuth provider registry (Connector Broker). Minimum scopes only.
  * NOTE deliberate absences: no gmail.send scope, no destructive scopes.
+ * gmail.compose is enough to send a draft the person approved; the action
+ * ladder, not a scope, is what keeps sending behind a promotion.
  */
 
 export type ProviderId =
@@ -47,9 +49,10 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     token_endpoint: "https://oauth2.googleapis.com/token",
     revocation_endpoint: "https://oauth2.googleapis.com/revoke",
     supports_pkce: true,
-    // One Google consent: read-only mail, drafts, read-only calendar. NEVER
-    // gmail.send. Mail and meetings are the agent's inputs; both are stored
-    // encrypted to the person.
+    // One Google consent: read-only mail, drafts, read-only calendar. Never
+    // the gmail.send scope; compose covers sending an approved draft. Mail
+    // and meetings are the agent's inputs; both are stored encrypted to the
+    // person.
     scopes: [
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",

@@ -615,6 +615,20 @@ details.dismiss .panel p {
   font-weight: 600;
   color: var(--ink);
 }
+/* the exact text of a message waiting to be sent */
+.proposal .message {
+  grid-column: 1;
+  margin: 6px 0 0;
+  padding: 12px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--ink);
+}
 .proposal .quotes {
   grid-column: 1;
   display: flex;

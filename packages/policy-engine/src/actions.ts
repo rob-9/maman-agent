@@ -18,6 +18,13 @@ export const ACTION_KINDS = {
    * organization has listed it (unattended_medium_capabilities).
    */
   "salesforce.update_opportunity": { risk: "medium", reversible: true, unattended_allowed: true },
+  /**
+   * Sending mail. High: it cannot be taken back. Never unattended unless the
+   * organization has said sends may be (allow_unattended_send) AND the
+   * person promoted that exact shape of send. Until then, one message at a
+   * time, the exact text shown, approved by the person.
+   */
+  "gmail.send": { risk: "high", reversible: false, unattended_allowed: true },
 } as const;
 export type ActionKind = keyof typeof ACTION_KINDS;
 
@@ -37,6 +44,8 @@ export function orgActionPolicy(
   const meta = ACTION_KINDS[kind];
   const unattended =
     meta.unattended_allowed &&
-    (meta.risk === "low" || policy.unattended_medium_capabilities.includes(kind));
+    (meta.risk === "low" ||
+      (meta.risk === "medium" && policy.unattended_medium_capabilities.includes(kind)) ||
+      (meta.risk === "high" && policy.allow_unattended_send));
   return { allowed: true, unattended };
 }

@@ -66,6 +66,12 @@ export const serverEnvSchema = z
     /** Drafts the sweep writes per person per sweep, when the agent is on. Default 3, 0 disables. */
     PREDRAFT_PER_SWEEP: z.coerce.number().int().min(0).max(20).optional(),
     /**
+     * CONNECTOR_MODE=demo only: the file the API and the worker share for
+     * what the product wrote into the scripted world (drafts, sent messages,
+     * tasks, opportunity fields). Fictional data. Default: the OS temp dir.
+     */
+    DEMO_WORLD_STATE_FILE: z.string().min(1).optional(),
+    /**
      * The event stream: every synced fact and every click derived into the
      * person's store as canonical events, for discovery. `on` (default).
      * `off`: nothing is derived; the rest of the product is unchanged.

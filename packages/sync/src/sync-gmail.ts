@@ -24,7 +24,7 @@ import { activeRules } from "./intents.js";
 import type { DealSourceResolver } from "./deal-source.js";
 import { runAgentPass, type AgentDeps, type AgentPassResult } from "./assess.js";
 import { runPredraft, type PredraftResult } from "./predraft.js";
-import { autoActions, sentFromMatchedDrafts, type ActionDeps } from "./actions.js";
+import { autoActions, sentFromMatchedDrafts, type ActionDeps, autoSends } from "./actions.js";
 import { runOpportunityPass, type OpportunityPassResult } from "./opportunity-pass.js";
 import { runEventStep, type EventStepResult } from "./events.js";
 import { runInference, type InferenceResult } from "./inference.js";
@@ -77,7 +77,7 @@ export type GmailSyncJobDeps = {
    * action is ever proposed. Present → proposed for every draft matched to a
    * sent message, and applied without asking only under a promotion.
    */
-  actions?: Pick<ActionDeps, "writer" | "opportunities" | "orgPolicy"> | undefined;
+  actions?: Pick<ActionDeps, "writer" | "opportunities" | "orgPolicy" | "gmail"> | undefined;
   /**
    * The event stream (EVENT_STREAM=on, the default). Absent → nothing is
    * derived and nothing else changes. Present → every synced fact and every
@@ -120,6 +120,7 @@ export type GmailSyncJobResult =
       predraft: PredraftResult | null;
       actions: { proposed: number; auto_applied: number; auto_failed: number } | null;
       opportunity: OpportunityPassResult | null;
+      sends: { considered: number; sent: number; failed: number } | null;
       inference: InferenceResult | null;
       events: EventStepResult | null;
       discovery: DiscoveryResult | null;
@@ -281,6 +282,15 @@ export async function runGmailSyncJob(
         )
       : null;
 
+  // Sends that the person promoted and the organization allows, and nothing
+  // else: every other draft waits in Gmail for them.
+  const sends = deps.actions?.gmail
+    ? await autoSends(
+        { ...deps.actions, sql: deps.sql, contentKey: deps.contentKey, now: deps.now },
+        ctx,
+      ).catch(() => null)
+    : null;
+
   // What the person's decisions say about how they work, proposed for them
   // to keep or decline. Never a rule until kept.
   const inference = await runInference(
@@ -361,6 +371,7 @@ export async function runGmailSyncJob(
     predraft,
     actions,
     opportunity,
+    sends,
     inference,
     events,
     discovery,

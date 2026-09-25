@@ -2557,3 +2557,110 @@ export async function listSentAfterDrafts(
     return rows.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString() }));
   });
 }
+
+// ---- drafts, for sending ----
+
+export type DraftForSend = {
+  id: string;
+  obligation_id: string | null;
+  thread_id: string;
+  gmail_draft_id: string;
+  subject: string;
+  body_ciphertext: Uint8Array;
+  mode: "manual" | "auto";
+  created_at: string;
+  matched_at: string | null;
+  sent_external_id: string | null;
+  contact_address: string;
+  contact_display_name: string;
+  contact_account_name: string | null;
+  /** The pending obligation's kind, when the item is still pending. */
+  obligation_kind: "awaiting_you" | "awaiting_them" | "unsent_followup" | null;
+  /** When the thread last moved, so a draft older than a reply is never sent over it. */
+  thread_last_message_at: string;
+};
+
+function toDraftForSend(r: {
+  id: string;
+  obligation_id: string | null;
+  thread_id: string;
+  gmail_draft_id: string;
+  subject: string;
+  body_ciphertext: Uint8Array;
+  mode: "manual" | "auto";
+  created_at: Date;
+  matched_at: Date | null;
+  sent_external_id: string | null;
+  contact_address: string;
+  contact_display_name: string;
+  contact_account_name: string | null;
+  obligation_kind: DraftForSend["obligation_kind"];
+  thread_last_message_at: Date;
+}): DraftForSend {
+  return {
+    ...r,
+    created_at: new Date(r.created_at).toISOString(),
+    matched_at: r.matched_at ? new Date(r.matched_at).toISOString() : null,
+    thread_last_message_at: new Date(r.thread_last_message_at).toISOString(),
+  };
+}
+
+// The situation a send answers is the thread's CURRENT pending item, not the
+// row the draft was written against: the sweep rewrites pending items each
+// pass and the draft's own link is set to null when its row goes.
+const DRAFT_FOR_SEND = `
+  SELECT d.id, d.obligation_id, d.thread_id, d.gmail_draft_id, d.subject, d.body_ciphertext, d.mode,
+         d.created_at, d.matched_at, d.sent_external_id,
+         c.external_id AS contact_address, c.display_name AS contact_display_name,
+         c.account_name AS contact_account_name,
+         o.kind AS obligation_kind,
+         t.last_message_at AS thread_last_message_at
+  FROM drafts d
+  JOIN threads t ON t.id = d.thread_id
+  JOIN contacts c ON c.id = t.contact_id
+  LEFT JOIN LATERAL (
+    SELECT kind FROM obligations
+    WHERE thread_id = d.thread_id AND outcome = 'pending'
+    ORDER BY created_at DESC LIMIT 1
+  ) o ON true
+`;
+
+export async function getDraftForSend(
+  sql: Sql,
+  ctx: UserContext,
+  draftId: string,
+): Promise<DraftForSend | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx.unsafe(`${DRAFT_FOR_SEND} WHERE d.id = $1 LIMIT 1`, [draftId]);
+    return rows[0]
+      ? toDraftForSend(rows[0] as unknown as Parameters<typeof toDraftForSend>[0])
+      : null;
+  });
+}
+
+/** The newest unsent draft on a thread, with everything a send needs. */
+export async function pendingDraftForThread(
+  sql: Sql,
+  ctx: UserContext,
+  threadId: string,
+): Promise<DraftForSend | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx.unsafe(
+      `${DRAFT_FOR_SEND} WHERE d.thread_id = $1 AND d.matched_at IS NULL ORDER BY d.created_at DESC LIMIT 1`,
+      [threadId],
+    );
+    return rows[0]
+      ? toDraftForSend(rows[0] as unknown as Parameters<typeof toDraftForSend>[0])
+      : null;
+  });
+}
+
+/** Every unsent draft whose item is still pending: what a promotion could send. */
+export async function listUnsentDraftsPending(sql: Sql, ctx: UserContext): Promise<DraftForSend[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx.unsafe(
+      `${DRAFT_FOR_SEND} WHERE d.matched_at IS NULL AND o.kind IS NOT NULL ORDER BY d.created_at`,
+    );
+    return rows.map((r) => toDraftForSend(r as unknown as Parameters<typeof toDraftForSend>[0]));
+  });
+}

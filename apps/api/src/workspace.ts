@@ -33,6 +33,7 @@ import {
   setObligationOutcome,
   type UserContext,
   listWorkflowEvents,
+  pendingDraftForThread,
 } from "@maman/db";
 import {
   createOrgVaultCredentialProvider,
@@ -57,6 +58,7 @@ import {
   decideOnRoutine,
   startRoutine,
   keepIntent,
+  proposeSend,
 } from "@maman/sync";
 import { createModelProvider } from "@maman/model-provider";
 import {
@@ -157,6 +159,16 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
       writer: salesforceActivityWriter({ credentials, transport: crmTransport }),
       opportunities: salesforceOpportunityWriter({ credentials, transport: crmTransport }),
       orgPolicy: orgPolicyResolver(sql),
+      // Sends go out as the person, through their own Gmail connection.
+      gmail: {
+        credentials: createUserVaultCredentialProvider({
+          sql,
+          masterKey: master,
+          transport: tokenTransport,
+          clientCredentials: clientFor,
+        }),
+        transport: gmailTransport,
+      },
       now,
     };
   };
@@ -545,6 +557,24 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: WorkspaceRou
     if (!principal) return;
     if (!deps.sql) return reply.status(503).send({ status: 503 });
     return { actions: await listActionViews(actionDeps(deps.sql), userCtx(principal)) };
+  });
+
+  /** "Send" on a card: propose sending the draft waiting on this thread, exactly as it is. */
+  app.post("/v1/me/obligations/:id/send", { schema: { tags: ["me"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const ctx = userCtx(principal);
+    const id = (req.params as { id: string }).id;
+    const target = await getObligationForDraft(deps.sql, ctx, id);
+    if (!target) return reply.status(404).send({ status: 404, title: "Not Found" });
+    const draft = await pendingDraftForThread(deps.sql, ctx, target.thread.id);
+    if (!draft) return reply.status(409).send({ status: 409, reason: "no_draft" });
+    const proposed = await proposeSend(actionDeps(deps.sql), ctx, { draft_id: draft.id });
+    if ("ok" in proposed) return reply.status(409).send({ status: 409, reason: proposed.reason });
+    return {
+      action: { id: proposed.id, diff_sha256: proposed.diff_sha256, status: proposed.status },
+    };
   });
 
   /** Proposes logging the last email the person sent on this thread. */
