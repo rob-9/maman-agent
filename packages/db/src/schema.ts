@@ -578,6 +578,19 @@ export const routine_runs = pgTable("routine_runs", {
   completed_at: utc("completed_at"),
 });
 
+/** What the agent proposed against what the person did. See migration 0020. */
+export const corrections = pgTable("corrections", {
+  id: uuid("id").primaryKey(),
+  organization_id: uuid("organization_id").notNull(),
+  owner_user_id: uuid("owner_user_id").notNull(),
+  kind: text("kind", { enum: ["draft", "crm_field", "routine_step"] }).notNull(),
+  ref_id: uuid("ref_id").notNull(),
+  contact_address: text("contact_address"),
+  signals: text("signals").array().notNull(),
+  summary: jsonb("summary").notNull(),
+  created_at: utc("created_at").notNull().defaultNow(),
+});
+
 /** The intent store. See migration 0014. */
 export const intents = pgTable("intents", {
   id: uuid("id").primaryKey(),

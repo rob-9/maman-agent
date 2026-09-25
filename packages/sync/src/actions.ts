@@ -16,8 +16,14 @@ import {
   withUser,
   type ActionRow,
   type UserContext,
+  recordCorrection,
 } from "@maman/db";
-import { promotionFor, type ContactRef, type IntentRuleRecord } from "@maman/obligation-engine";
+import {
+  promotionFor,
+  type ContactRef,
+  type IntentRuleRecord,
+  fieldSkipped,
+} from "@maman/obligation-engine";
 import {
   DEFAULT_ORG_POLICY,
   orgActionPolicy,
@@ -173,6 +179,7 @@ export async function proposeOpportunityUpdate(
     thread_id: string;
     contact_id: string;
     contact_display_name: string;
+    contact_address?: string | undefined;
     message_external_id: string;
     opportunity: OpportunityRecord;
     read: OpportunityOutput;
@@ -190,15 +197,31 @@ export async function proposeOpportunityUpdate(
   const policy = orgActionPolicy(await deps.orgPolicy(ctx.organizationId), UPDATE_OPPORTUNITY);
   if (!policy.allowed) return { ok: false, reason: "not_allowed" };
   if (input.opportunity.is_closed) return { ok: false, reason: "nothing_to_change" };
+  // Fields the person said not to propose (a kept inference, or their own
+  // words) are left out before anything is compared.
+  const rules = await activeRules(deps.sql, ctx);
+  const contactRef = input.contact_address
+    ? { address: input.contact_address, display_name: input.contact_display_name }
+    : undefined;
+  const skipNext = fieldSkipped(rules, "next_step", contactRef) !== undefined;
+  const skipClose = fieldSkipped(rules, "close_date", contactRef) !== undefined;
   const changes: OpportunityDiff["changes"] = {};
-  if (input.read.next_step && input.read.next_step.value !== (input.opportunity.next_step ?? "")) {
+  if (
+    !skipNext &&
+    input.read.next_step &&
+    input.read.next_step.value !== (input.opportunity.next_step ?? "")
+  ) {
     changes.next_step = {
       from: input.opportunity.next_step,
       to: input.read.next_step.value,
       quote: input.read.next_step.quote,
     };
   }
-  if (input.read.close_date && input.read.close_date.value !== input.opportunity.close_date) {
+  if (
+    !skipClose &&
+    input.read.close_date &&
+    input.read.close_date.value !== input.opportunity.close_date
+  ) {
     changes.close_date = {
       from: input.opportunity.close_date,
       to: input.read.close_date.value,
@@ -263,7 +286,21 @@ export async function declineAction(
   ctx: UserContext,
   id: string,
 ): Promise<boolean> {
-  return (await transitionAction(deps.sql, ctx, id, ["proposed"], { status: "declined" })) !== null;
+  const row = await transitionAction(deps.sql, ctx, id, ["proposed"], { status: "declined" });
+  if (!row) return false;
+  // "Not now" on a proposal is the person correcting the agent. Which fields
+  // it proposed is the signal; the values are not kept here.
+  if (row.kind === UPDATE_OPPORTUNITY) {
+    const d = row.diff as OpportunityDiff;
+    await recordCorrection(deps.sql, ctx, {
+      kind: "crm_field",
+      ref_id: row.id,
+      contact_address: null,
+      signals: Object.keys(d.changes).map((f) => `declined:${f}`),
+      summary: { opportunity: d.opportunity_name },
+    });
+  }
+  return true;
 }
 
 export type ApplyResult =
@@ -483,6 +520,14 @@ async function applyOpportunityUpdate(
       moved.push("close_date");
     }
     if (moved.length > 0) {
+      // The person set the field themselves. That is a correction too.
+      await recordCorrection(deps.sql, ctx, {
+        kind: "crm_field",
+        ref_id: action.id,
+        contact_address: null,
+        signals: moved.map((f) => `hand_edit:${f}`),
+        summary: { opportunity: diff.opportunity_name, fields: moved },
+      });
       const row = await transitionAction(deps.sql, ctx, action.id, ["approved"], {
         status: "stale",
         error: `changed in Salesforce since you saw it: ${moved.join(", ")}`,

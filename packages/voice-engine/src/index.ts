@@ -13,3 +13,10 @@ export {
   type ComposedDraftWithProvenance,
   type ContextComposer,
 } from "./model-composer.js";
+export {
+  compareText,
+  greetingOf,
+  signoffOf,
+  wordCount,
+  type TextCorrection,
+} from "./corrections.js";

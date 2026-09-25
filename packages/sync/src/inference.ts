@@ -1,6 +1,17 @@
 import type { Sql } from "postgres";
-import { createIntent, listDecidedObligations, listIntents, type UserContext } from "@maman/db";
-import { inferIntents, intentRuleSchema, type IntentRule } from "@maman/obligation-engine";
+import {
+  createIntent,
+  listCorrections,
+  listDecidedObligations,
+  listIntents,
+  type UserContext,
+} from "@maman/db";
+import {
+  inferFromCorrections,
+  inferIntents,
+  intentRuleSchema,
+  type IntentRule,
+} from "@maman/obligation-engine";
 import { encryptBody } from "./content.js";
 
 /**
@@ -13,7 +24,7 @@ import { encryptBody } from "./content.js";
 
 export type InferenceDeps = { sql: Sql; contentKey: Buffer; now: () => Date };
 
-export type InferenceResult = { decisions: number; proposed: number };
+export type InferenceResult = { decisions: number; corrections: number; proposed: number };
 
 /** Decisions older than this are not evidence of how the person works now. */
 export const INFERENCE_WINDOW_DAYS = 90;
@@ -23,8 +34,9 @@ export async function runInference(
   ctx: UserContext,
 ): Promise<InferenceResult> {
   const since = new Date(deps.now().getTime() - INFERENCE_WINDOW_DAYS * 86_400_000);
-  const [decisions, intents] = await Promise.all([
+  const [decisions, corrections, intents] = await Promise.all([
     listDecidedObligations(deps.sql, ctx, { since }),
+    listCorrections(deps.sql, ctx, { since }),
     listIntents(deps.sql, ctx, { status: "all", limit: 500 }),
   ]);
   const existing: IntentRule[] = [];
@@ -45,7 +57,16 @@ export async function runInference(
     })),
     existing,
   );
-  for (const i of inferred) {
+  // What the person changed in what the agent produced: drafts, fields, steps.
+  const fromCorrections = inferFromCorrections(
+    corrections.map((c) => ({
+      kind: c.kind,
+      signals: c.signals,
+      summary: (c.summary ?? {}) as { words_actual?: number } & Record<string, unknown>,
+    })),
+    existing,
+  );
+  for (const i of [...inferred, ...fromCorrections]) {
     await createIntent(deps.sql, ctx, {
       text_ciphertext: encryptBody(i.text, deps.contentKey, ctx),
       text_chars: i.text.length,
@@ -57,5 +78,9 @@ export async function runInference(
       origin: { evidence: i.evidence },
     });
   }
-  return { decisions: decisions.length, proposed: inferred.length };
+  return {
+    decisions: decisions.length,
+    corrections: corrections.length,
+    proposed: inferred.length + fromCorrections.length,
+  };
 }

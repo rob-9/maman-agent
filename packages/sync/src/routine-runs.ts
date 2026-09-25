@@ -18,6 +18,7 @@ import {
   type RoutineCandidateRow,
   type RoutineRunRow,
   type UserContext,
+  recordCorrection,
 } from "@maman/db";
 import { canonicalToken, toPatternFeature } from "@maman/pattern-engine";
 import type { ModelProvider } from "@maman/model-provider";
@@ -207,7 +208,24 @@ export async function runRoutines(
         comparison,
         completed_at: now.toISOString(),
       });
-      if (row) result.shadow_completed += 1;
+      if (row) {
+        result.shadow_completed += 1;
+        // The steps the person skipped or added are a correction of the routine.
+        const missed = proposed.filter((p) => !actual.some((a) => a.field === p.field));
+        const extra = actual.filter((a) => !proposed.some((p) => p.field === a.field));
+        if (missed.length > 0 || extra.length > 0) {
+          await recordCorrection(deps.sql, ctx, {
+            kind: "routine_step",
+            ref_id: run.id,
+            contact_address: null,
+            signals: [
+              ...missed.map((m) => `skipped:${m.field}`),
+              ...extra.map((e) => `added:${e.field}`),
+            ],
+            summary: { agreement: comparison.agreement },
+          });
+        }
+      }
     }
   }
   return result;

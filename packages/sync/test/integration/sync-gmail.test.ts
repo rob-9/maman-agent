@@ -26,7 +26,7 @@ import type { AssessmentInput, ModelProvider } from "@maman/model-provider";
 import { createUserVaultCredentialProvider } from "../../src/user-vault-credentials.js";
 import { runGmailSyncJob } from "../../src/sync-gmail.js";
 import { decryptBody, encryptBody, storedThreadContent } from "../../src/content.js";
-import { voiceFor } from "../../src/voice.js";
+import { matchSentDrafts, voiceFor } from "../../src/voice.js";
 import { meetingContext } from "../../src/meetings.js";
 import {
   activeRules,
@@ -55,6 +55,7 @@ import {
   proposeActivityLog,
   revertAction,
   sentFromMatchedDrafts,
+  proposeOpportunityUpdate,
 } from "../../src/actions.js";
 import { runOpportunityPass } from "../../src/opportunity-pass.js";
 import { deriveEvents, runEventStep } from "../../src/events.js";
@@ -67,6 +68,7 @@ import { runPatternEngine, segmentByCase, toPatternFeature } from "@maman/patter
 import { patternFeatureEventSchema } from "@maman/contracts";
 import {
   countWorkflowEvents,
+  listCorrections,
   listRoutineCandidates,
   listWorkflowEvents,
   loadDetectionInputs,
@@ -2254,7 +2256,7 @@ describe("what the agent infers from decisions, held until kept", () => {
       expect(await setObligationOutcome(client.sql, ctx, o.id, "dismissed")).toBe(true);
 
     const r = await runInference(ideps(), ctx);
-    expect(r).toEqual({ decisions: 2, proposed: 1 });
+    expect(r).toMatchObject({ decisions: 2, proposed: 1 });
     const views = await listIntentViews(ideps(), ctx);
     const guess = views.find((v) => v.status === "proposed")!;
     expect(guess.text).toBe("Don't chase Bob Ray.");
@@ -2265,7 +2267,7 @@ describe("what the agent infers from decisions, held until kept", () => {
       false,
     );
     // Proposed once. A second pass proposes nothing new.
-    expect(await runInference(ideps(), ctx)).toEqual({ decisions: 2, proposed: 0 });
+    expect(await runInference(ideps(), ctx)).toMatchObject({ decisions: 2, proposed: 0 });
   });
 
   it("kept, it is a rule the next sweep enforces; declined, it is never proposed again", async () => {
@@ -2337,6 +2339,209 @@ describe("what the agent infers from decisions, held until kept", () => {
     const { forgetIntent } = await import("../../src/intents.js");
     expect(await forgetIntent(ideps(), ctx, wait.id)).toBe(true);
     expect((await listIntentViews(ideps(), ctx)).some((v) => v.status === "proposed")).toBe(false);
-    expect(await runInference(ideps(), ctx)).toEqual({ decisions: 3, proposed: 0 });
+    expect(await runInference(ideps(), ctx)).toMatchObject({ decisions: 3, proposed: 0 });
+  });
+});
+
+describe("the draft learns from what the person sends", () => {
+  const dora = uuidv7();
+  const ctx = { organizationId: orgId, userId: dora };
+  const ideps = () => ({ sql: client.sql, contentKey: master, now: () => NOW });
+  const real = Date.now();
+  const at = (offsetMs: number) => new Date(real + offsetMs).toISOString();
+  let connId = "";
+  const draftText = (name: string) =>
+    `Hi ${name},\n\nI hope you're well. Following up on our conversation from last week. Would it help to find a time this week to pick this up? Happy to work around your calendar.\n\nBest regards,\nDora\n`;
+  const sentText = (name: string) =>
+    `Hi ${name},\n\nQuick one: does Thursday at 3 work to pick this up?\n\nBest,\nDora\n`;
+
+  it("each sent draft leaves a correction with what changed; three of the same become proposals", async () => {
+    await seedUser(dora, "dora@co.example");
+    connId = await linkGmail(dora, "dora@co.example");
+    const people = [
+      ["maya@bluepeak.example", "Maya"],
+      ["omar@kestrel.example", "Omar"],
+      ["lena@solstice.example", "Lena"],
+    ] as const;
+    for (const [i, [address, name]] of people.entries()) {
+      await upsertSyncedThreads(client.sql, ctx, {
+        connection_id: connId,
+        threads: [
+          {
+            external_id: `d${i}`,
+            subject: `Catch up ${i}`,
+            last_message_at: at(-86_400_000),
+            last_direction: "inbound",
+            message_count: 1,
+            contact: { address, display_name: name },
+          },
+        ],
+      });
+    }
+    const { threads } = await loadDetectionInputs(client.sql, ctx);
+    await replacePendingObligations(
+      client.sql,
+      ctx,
+      threads.map((t) => ({
+        thread_id: t.thread_id,
+        contact_id: t.contact_id,
+        kind: "awaiting_you" as const,
+        rank: 50,
+        reason: {
+          kind: "awaiting_you",
+          days_elapsed: 1,
+          threshold_days: 1,
+          last_direction: "inbound",
+          message_count: 1,
+          has_open_deal: null,
+        },
+      })),
+      NOW,
+    );
+    const pendingByThread = new Map(
+      (await listPendingObligations(client.sql, ctx, 20, { agent: false })).map((o) => [
+        o.thread_id,
+        o.id,
+      ]),
+    );
+    for (const [i, [, name]] of people.entries()) {
+      const t = threads.find((x) => x.subject === `Catch up ${i}`)!;
+      await recordDraftRow(client.sql, ctx, {
+        obligation_id: pendingByThread.get(t.thread_id)!,
+        thread_id: t.thread_id,
+        gmail_draft_id: `gd${i}`,
+        subject: `Catch up ${i}`,
+        body_ciphertext: encryptBody(draftText(name), master, ctx),
+        body_chars: 10,
+        composer: "deterministic",
+        mode: "auto",
+      });
+      // Then the person sends their own version.
+      await upsertSyncedThreads(client.sql, ctx, {
+        connection_id: connId,
+        threads: [
+          {
+            external_id: `d${i}`,
+            subject: `Catch up ${i}`,
+            last_message_at: at(60_000),
+            last_direction: "outbound",
+            message_count: 2,
+            contact: { address: people[i]![0], display_name: name },
+            messages: [
+              {
+                external_id: `sent${i}`,
+                from_address: "dora@co.example",
+                direction: "outbound",
+                sent_at: at(60_000),
+                body_ciphertext: encryptBody(sentText(name), master, ctx),
+                body_chars: 10,
+              },
+            ],
+          },
+        ],
+      });
+    }
+    const matched = await matchSentDrafts({ sql: client.sql, contentKey: master }, ctx);
+    expect(matched.matched).toBe(3);
+    const corrections = await listCorrections(client.sql, ctx, { since: new Date(0) });
+    expect(corrections.length).toBe(3);
+    expect(corrections[0]!.signals).toEqual(["shorter", "signoff:Best, Dora", "no_opener"]);
+    expect(corrections[0]!.contact_address).toMatch(/@/);
+    // Nothing of the text is in the correction.
+    expect(JSON.stringify(corrections)).not.toContain("Quick one");
+
+    const r = await runInference(ideps(), ctx);
+    expect(r.corrections).toBe(3);
+    const guesses = (await listIntentViews(ideps(), ctx))
+      .filter((v) => v.status === "proposed")
+      .map((v) => v.text)
+      .sort();
+    expect(guesses).toEqual([
+      "Keep drafts short, about 20 words.",
+      'Sign off with "Best, Dora".',
+      "Skip the pleasantries at the top. Get to the point.",
+    ]);
+    expect(await runInference(ideps(), ctx)).toMatchObject({ proposed: 0 });
+  });
+
+  it("kept, a style reaches the writer as the person's instruction; their sent version leads the voice examples", async () => {
+    const signoff = (await listIntentViews(ideps(), ctx)).find((v) =>
+      v.text.startsWith("Sign off"),
+    )!;
+    expect(await keepIntent(ideps(), ctx, signoff.id)).toBe(true);
+    const prefs = await intentsFor(ideps(), ctx, {
+      contact_address: "maya@bluepeak.example",
+      account_name: null,
+      kind: "awaiting_you",
+    });
+    expect(prefs).toContain('Sign off with "Best, Dora".');
+    const { contacts } = await loadDetectionInputs(client.sql, ctx);
+    const maya = contacts.find((c) => c.address === "maya@bluepeak.example")!;
+    const voice = await voiceFor({ sql: client.sql, contentKey: master }, ctx, maya.contact_id);
+    expect(voice.to_this_contact[0]).toContain("Quick one");
+    expect(voice.recent[0]).toContain("Quick one");
+  });
+
+  it("three declined close-date proposals become 'don't propose the close date'; kept, the field is left out", async () => {
+    const odeps = {
+      sql: client.sql,
+      contentKey: master,
+      writer: {} as never,
+      orgPolicy: async () => DEFAULT_ORG_POLICY,
+      now: () => NOW,
+    };
+    const { threads, contacts } = await loadDetectionInputs(client.sql, ctx);
+    const opp = {
+      id: "006X",
+      name: "Bluepeak rollout",
+      stage: "Proposal",
+      next_step: null,
+      close_date: "2026-12-31",
+      is_closed: false,
+    };
+    for (const [i, t] of threads.slice(0, 3).entries()) {
+      const contact = contacts.find((c) => c.contact_id === t.contact_id)!;
+      const proposed = await proposeOpportunityUpdate(odeps, ctx, {
+        thread_id: t.thread_id,
+        contact_id: t.contact_id,
+        contact_display_name: contact.display_name,
+        contact_address: contact.address,
+        message_external_id: `sent${i}`,
+        opportunity: opp,
+        read: {
+          next_step: null,
+          close_date: {
+            value: "2026-09-30",
+            quote: "Quick one: does Thursday at 3 work to pick this up?",
+          },
+        },
+      });
+      expect("id" in proposed).toBe(true);
+      if ("id" in proposed) expect(await declineAction(odeps, ctx, proposed.id)).toBe(true);
+    }
+    const r = await runInference(ideps(), ctx);
+    expect(r.proposed).toBe(1);
+    const guess = (await listIntentViews(ideps(), ctx)).find((v) => v.status === "proposed")!;
+    expect(guess.text).toBe("Don't propose changes to the close date.");
+    expect(guess.evidence).toBe("You turned down or rewrote 3 proposed close date changes.");
+    expect(await keepIntent(ideps(), ctx, guess.id)).toBe(true);
+    // Both fields read from the thread; only the next step is proposed.
+    const t = threads[0]!;
+    const contact = contacts.find((c) => c.contact_id === t.contact_id)!;
+    const again = await proposeOpportunityUpdate(odeps, ctx, {
+      thread_id: t.thread_id,
+      contact_id: t.contact_id,
+      contact_display_name: contact.display_name,
+      contact_address: contact.address,
+      message_external_id: "sent-later",
+      opportunity: opp,
+      read: {
+        next_step: { value: "send the MSA", quote: "Next step: send the MSA." },
+        close_date: { value: "2026-09-30", quote: "by end of quarter" },
+      },
+    });
+    expect("id" in again).toBe(true);
+    if ("id" in again)
+      expect(Object.keys((again.diff as { changes: object }).changes)).toEqual(["next_step"]);
   });
 });

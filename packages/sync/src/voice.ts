@@ -7,7 +7,11 @@ import {
   listUnmatchedDrafts,
   matchDraftToSent,
   type UserContext,
+  listSentAfterDrafts,
+  recordCorrection,
+  threadContactAddress,
 } from "@maman/db";
+import { compareText } from "@maman/voice-engine";
 import { decryptBody } from "./content.js";
 import { stateIntent } from "./intents.js";
 
@@ -36,15 +40,23 @@ export async function voiceFor(
 ): Promise<Voice> {
   const open = (rows: { body_ciphertext: Uint8Array }[]) =>
     rows.map((r) => decryptBody(r.body_ciphertext, deps.contentKey, ctx).slice(0, MAX_CHARS));
-  const [toContact, similar, recent] = await Promise.all([
+  const [toContact, similar, recent, editedForContact, edited] = await Promise.all([
     listOutboundMessagesForContact(deps.sql, ctx, contactId, { limit: 3 }),
     listOutboundFollowUps(deps.sql, ctx, { limit: 3 }),
     listRecentOutboundMessages(deps.sql, ctx, { limit: 4, min_chars: 80 }),
+    listSentAfterDrafts(deps.sql, ctx, { contact_id: contactId, limit: 2 }),
+    listSentAfterDrafts(deps.sql, ctx, { limit: 2 }),
   ]);
+  // What the person sent after editing a draft is the best example of what
+  // they wanted. It goes first, and is not repeated below it.
+  const dedupe = (first: typeof toContact, rest: typeof toContact) => [
+    ...first,
+    ...rest.filter((r) => !first.some((f) => f.external_id === r.external_id)),
+  ];
   return {
-    to_this_contact: open(toContact),
+    to_this_contact: open(dedupe(editedForContact, toContact)).slice(0, 4),
     similar_situations: open(similar),
-    recent: open(recent),
+    recent: open(dedupe(edited, recent)).slice(0, 5),
   };
 }
 
@@ -110,6 +122,16 @@ export async function matchSentDrafts(
       external_id: sent.external_id,
       sent_at: sent.sent_at,
       edit_ratio: ratio,
+    });
+    // What changed, as signals: the correction the agent learns from. The
+    // texts stay where they are.
+    const changed = compareText(draftText, sentText);
+    await recordCorrection(deps.sql, ctx, {
+      kind: "draft",
+      ref_id: d.id,
+      contact_address: await threadContactAddress(deps.sql, ctx, d.thread_id),
+      signals: changed.signals,
+      summary: { ...changed.summary, edit_ratio: ratio },
     });
     matched += 1;
     items.push({

@@ -2440,3 +2440,120 @@ export async function listRoutineRuns(
     return rows.map(toRunRow);
   });
 }
+
+// ---- corrections: what the agent proposed against what the person did ----
+
+export type CorrectionKind = "draft" | "crm_field" | "routine_step";
+
+export type CorrectionRow = {
+  id: string;
+  kind: CorrectionKind;
+  ref_id: string;
+  contact_address: string | null;
+  signals: string[];
+  summary: unknown;
+  created_at: string;
+};
+
+/** One correction per thing. A second write for the same draft, action or run changes nothing. */
+export async function recordCorrection(
+  sql: Sql,
+  ctx: UserContext,
+  input: {
+    kind: CorrectionKind;
+    ref_id: string;
+    contact_address: string | null;
+    signals: string[];
+    summary: unknown;
+  },
+): Promise<boolean> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx`
+      INSERT INTO corrections (id, organization_id, owner_user_id, kind, ref_id, contact_address, signals, summary)
+      VALUES (${uuidv7()}, ${ctx.organizationId}, ${ctx.userId}, ${input.kind}, ${input.ref_id},
+              ${input.contact_address}, ${input.signals}, ${JSON.stringify(input.summary)}::jsonb)
+      ON CONFLICT (owner_user_id, kind, ref_id) DO NOTHING
+      RETURNING id
+    `;
+    return rows.length === 1;
+  });
+}
+
+export async function listCorrections(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { since: Date; kind?: CorrectionKind | undefined },
+): Promise<CorrectionRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.corrections)
+      .where(
+        and(
+          gte(schema.corrections.created_at, opts.since.toISOString()),
+          ...(opts.kind ? [eq(schema.corrections.kind, opts.kind)] : []),
+        ),
+      )
+      .orderBy(desc(schema.corrections.created_at));
+    return rows.map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      ref_id: r.ref_id,
+      contact_address: r.contact_address,
+      signals: r.signals,
+      summary: r.summary,
+      created_at: new Date(r.created_at).toISOString(),
+    }));
+  });
+}
+
+/** The contact a thread is with, for a correction to be about someone. */
+export async function threadContactAddress(
+  sql: Sql,
+  ctx: UserContext,
+  threadId: string,
+): Promise<string | null> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<Array<{ external_id: string }>>`
+      SELECT c.external_id FROM threads t JOIN contacts c ON c.id = t.contact_id WHERE t.id = ${threadId}
+    `;
+    return rows[0]?.external_id ?? null;
+  });
+}
+
+/**
+ * Messages the person sent after editing one of the agent's drafts: the best
+ * examples there are of what they wanted, newest first. For one contact when
+ * asked, otherwise anyone.
+ */
+export async function listSentAfterDrafts(
+  sql: Sql,
+  ctx: UserContext,
+  opts: { contact_id?: string | undefined; limit?: number } = {},
+): Promise<StoredMessageRow[]> {
+  return withUser(sql, ctx, async (tx) => {
+    const rows = await tx<
+      Array<{
+        external_id: string;
+        from_address: string;
+        from_display_name: string | null;
+        direction: "inbound" | "outbound";
+        sent_at: Date;
+        body_ciphertext: Uint8Array;
+        body_chars: number;
+      }>
+    >`
+      SELECT m.external_id, m.from_address, m.from_display_name, m.direction, m.sent_at,
+             m.body_ciphertext, m.body_chars
+      FROM drafts d
+      JOIN messages m ON m.external_id = d.sent_external_id AND m.thread_id = d.thread_id
+      JOIN threads t ON t.id = d.thread_id
+      WHERE d.matched_at IS NOT NULL
+        AND d.edit_ratio IS NOT NULL AND d.edit_ratio < 0.9
+        AND (${opts.contact_id ?? null}::uuid IS NULL OR t.contact_id = ${opts.contact_id ?? null}::uuid)
+      ORDER BY m.sent_at DESC
+      LIMIT ${opts.limit ?? 2}
+    `;
+    return rows.map((r) => ({ ...r, sent_at: new Date(r.sent_at).toISOString() }));
+  });
+}

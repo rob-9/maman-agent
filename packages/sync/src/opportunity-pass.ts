@@ -116,6 +116,7 @@ export async function runOpportunityPass(
         thread_id: c.thread_id,
         contact_id: c.contact_id,
         contact_display_name: c.contact_display_name,
+        contact_address: c.contact_address,
         message_external_id: lastExternal,
         opportunity,
         read: value,

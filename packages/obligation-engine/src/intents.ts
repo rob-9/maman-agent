@@ -78,6 +78,29 @@ export const intentRuleSchema = z.discriminatedUnion("kind", [
       scope: intentScopeSchema,
     })
     .strict(),
+
+  /**
+   * How the person writes, learned from what they sent: length, greeting,
+   * sign-off, opener. Not enforced by detection; the sentence goes to the
+   * writer as the person's own instruction. The rule is here so the same
+   * thing is never proposed twice.
+   */
+  z
+    .object({
+      kind: z.literal("style"),
+      key: z.enum(["length", "greeting", "signoff", "opener"]),
+      value: z.string().min(1).max(80),
+      scope: intentScopeSchema,
+    })
+    .strict(),
+  /** Do not propose changes to this CRM field. Enforced where proposals are made. */
+  z
+    .object({
+      kind: z.literal("skip_field"),
+      field: z.enum(["next_step", "close_date"]),
+      scope: intentScopeSchema,
+    })
+    .strict(),
 ]);
 export type IntentRule = z.infer<typeof intentRuleSchema>;
 
@@ -262,5 +285,19 @@ export function promotionFor(
       rule.action_kind === action.kind &&
       rule.shape_sha256 === action.shape_sha256 &&
       inScope(rule.scope, contact, obligationKind),
+  );
+}
+
+/** Whether a rule says not to propose this field for this person, in scope. */
+export function fieldSkipped(
+  rules: readonly IntentRuleRecord[],
+  field: "next_step" | "close_date",
+  contact: ContactRef | undefined,
+): IntentRuleRecord | undefined {
+  return rules.find(
+    ({ rule }) =>
+      rule.kind === "skip_field" &&
+      rule.field === field &&
+      inScope(rule.scope, contact, "awaiting_you"),
   );
 }

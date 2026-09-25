@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { applyIntentRules, inferIntents, type Decision } from "../src/index.js";
+import {
+  applyIntentRules,
+  fieldSkipped,
+  inferFromCorrections,
+  inferIntents,
+  type Correction,
+  type Decision,
+} from "../src/index.js";
 import type { Obligation } from "../src/types.js";
 
 const bob = { address: "bob@client.com", display_name: "Bob Ray", account_name: "Client Co" };
@@ -168,5 +175,144 @@ describe("'wait N days before chasing', applied", () => {
       new Map(),
     );
     expect(applied.skipped.map((s) => s.obligation.contact_id)).toEqual(["c1"]);
+  });
+});
+
+describe("what the agent infers from corrections", () => {
+  const draft = (signals: string[], words = 60): Correction => ({
+    kind: "draft",
+    signals,
+    summary: { words_actual: words },
+  });
+  const crm = (signals: string[]): Correction => ({ kind: "crm_field", signals, summary: {} });
+
+  it("the same sign-off three times is how they sign; twice is not", () => {
+    expect(
+      inferFromCorrections([draft(["signoff:Best, Alex"]), draft(["signoff:Best, Alex"])], []),
+    ).toEqual([]);
+    const out = inferFromCorrections(
+      [
+        draft(["signoff:Best, Alex"]),
+        draft(["signoff:Best, Alex"]),
+        draft(["signoff:Best, Alex", "shorter"]),
+      ],
+      [],
+    );
+    expect(out.map((o) => o.text)).toEqual(['Sign off with "Best, Alex".']);
+    expect(out[0]!.evidence).toBe('You changed the sign-off to "Best, Alex" on 3 drafts.');
+    expect(out[0]!.rule).toEqual({
+      kind: "style",
+      key: "signoff",
+      value: "Best, Alex",
+      scope: { kind: "global" },
+    });
+    // Dropping the sign-off is not a sign-off to learn.
+    expect(
+      inferFromCorrections(
+        [draft(["signoff:none"]), draft(["signoff:none"]), draft(["signoff:none"])],
+        [],
+      ),
+    ).toEqual([]);
+  });
+
+  it("three shortened drafts become a length, from the median of what they sent, rounded", () => {
+    const out = inferFromCorrections(
+      [draft(["shorter"], 48), draft(["shorter"], 61), draft(["shorter"], 90)],
+      [],
+    );
+    expect(out.map((o) => o.text)).toEqual(["Keep drafts short, about 60 words."]);
+    expect(out[0]!.rule).toEqual({
+      kind: "style",
+      key: "length",
+      value: "60",
+      scope: { kind: "global" },
+    });
+    const opener = inferFromCorrections(
+      [draft(["no_opener"]), draft(["no_opener"]), draft(["no_opener"])],
+      [],
+    );
+    expect(opener[0]!.text).toBe("Skip the pleasantries at the top. Get to the point.");
+    const greeting = inferFromCorrections(
+      [
+        draft(["greeting:Hey {name},"]),
+        draft(["greeting:Hey {name},"]),
+        draft(["greeting:Hey {name},"]),
+      ],
+      [],
+    );
+    expect(greeting[0]!.text).toBe('Open with "Hey first name,".');
+  });
+
+  it("declined and overwritten field changes count together, and become 'don't propose this field'", () => {
+    const out = inferFromCorrections(
+      [
+        crm(["declined:close_date"]),
+        crm(["hand_edit:close_date"]),
+        crm(["declined:close_date", "declined:next_step"]),
+      ],
+      [],
+    );
+    expect(out.map((o) => o.text)).toEqual(["Don't propose changes to the close date."]);
+    expect(out[0]!.evidence).toBe("You turned down or rewrote 3 proposed close date changes.");
+    expect(out[0]!.rule).toEqual({
+      kind: "skip_field",
+      field: "close_date",
+      scope: { kind: "global" },
+    });
+  });
+
+  it("never proposes a style or field rule that already exists, whatever its value", () => {
+    const three = [
+      draft(["signoff:Best, Alex"]),
+      draft(["signoff:Best, Alex"]),
+      draft(["signoff:Best, Alex"]),
+    ];
+    expect(
+      inferFromCorrections(three, [
+        { kind: "style", key: "signoff", value: "Cheers, Alex", scope: { kind: "global" } },
+      ]),
+    ).toEqual([]);
+    const fields = [
+      crm(["declined:next_step"]),
+      crm(["declined:next_step"]),
+      crm(["declined:next_step"]),
+    ];
+    expect(
+      inferFromCorrections(fields, [
+        { kind: "skip_field", field: "next_step", scope: { kind: "global" } },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("a kept 'skip this field' rule is found for the field, in scope", () => {
+    const rules = [
+      {
+        id: "i1",
+        rule: {
+          kind: "skip_field" as const,
+          field: "close_date" as const,
+          scope: { kind: "contact" as const, value: "bob@client.com" },
+        },
+      },
+    ];
+    expect(fieldSkipped(rules, "close_date", bob)?.id).toBe("i1");
+    expect(fieldSkipped(rules, "next_step", bob)).toBeUndefined();
+    expect(fieldSkipped(rules, "close_date", sam)).toBeUndefined();
+    expect(
+      fieldSkipped(
+        [
+          {
+            id: "i2",
+            rule: {
+              kind: "skip_field" as const,
+              field: "close_date" as const,
+              scope: { kind: "global" as const },
+            },
+          },
+        ],
+        "close_date",
+        undefined,
+      )?.id,
+    ).toBe("i2");
   });
 });

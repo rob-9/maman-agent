@@ -31,6 +31,10 @@ import {
   retireIntent,
   confirmIntent,
   listDecidedObligations,
+  recordCorrection,
+  listCorrections,
+  listSentAfterDrafts,
+  threadContactAddress,
   listSkippedObligations,
   loadEventFacts,
   recordWorkflowEvents,
@@ -1565,5 +1569,145 @@ describe("what the agent inferred, held until kept", () => {
         { since: NOW },
       ),
     ).toEqual([]);
+  });
+});
+
+describe("corrections: what the agent proposed against what the person did", () => {
+  it("one correction per thing; listed newest first, by kind when asked; a colleague reads none", async () => {
+    const ref = uuidv7();
+    expect(
+      await recordCorrection(db.client.sql, ctx, {
+        kind: "draft",
+        ref_id: ref,
+        contact_address: "bob@client.com",
+        signals: ["shorter", "signoff:Best, Me"],
+        summary: { words_actual: 40 },
+      }),
+    ).toBe(true);
+    expect(
+      await recordCorrection(db.client.sql, ctx, {
+        kind: "draft",
+        ref_id: ref,
+        contact_address: "bob@client.com",
+        signals: ["longer"],
+        summary: {},
+      }),
+    ).toBe(false);
+    await recordCorrection(db.client.sql, ctx, {
+      kind: "crm_field",
+      ref_id: uuidv7(),
+      contact_address: null,
+      signals: ["declined:close_date"],
+      summary: {},
+    });
+    const all = await listCorrections(db.client.sql, ctx, {
+      since: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    expect(all.length).toBeGreaterThanOrEqual(2);
+    expect(all.find((c) => c.ref_id === ref)?.signals).toEqual(["shorter", "signoff:Best, Me"]);
+    const drafts = await listCorrections(db.client.sql, ctx, {
+      since: new Date("2026-01-01T00:00:00.000Z"),
+      kind: "draft",
+    });
+    expect(drafts.every((c) => c.kind === "draft")).toBe(true);
+    expect(
+      await listCorrections(
+        db.client.sql,
+        { organizationId: orgId, userId: uuidv7() },
+        { since: new Date(0) },
+      ),
+    ).toEqual([]);
+  });
+
+  it("a message the person sent after editing a draft is found, and one sent as written is not", async () => {
+    await upsertSyncedThreads(db.client.sql, ctx, {
+      connection_id: connId,
+      threads: [
+        T({
+          external_id: "gm-edited",
+          subject: "Edited",
+          last_message_at: "2026-09-20T09:00:00.000Z",
+          messages: [
+            {
+              external_id: "sent-edited",
+              from_address: "me@co.example",
+              direction: "outbound",
+              sent_at: "2026-09-20T09:00:00.000Z",
+              body_ciphertext: new Uint8Array([7]),
+              body_chars: 1,
+            },
+          ],
+        }),
+      ],
+    });
+    const { threads } = await loadDetectionInputs(db.client.sql, ctx);
+    const t = threads.find((x) => x.subject === "Edited")!;
+    expect(await threadContactAddress(db.client.sql, ctx, t.thread_id)).toBe("bob@client.com");
+    await replacePendingObligations(
+      db.client.sql,
+      ctx,
+      [
+        {
+          thread_id: t.thread_id,
+          contact_id: t.contact_id,
+          kind: "awaiting_them",
+          rank: 30,
+          reason: {
+            kind: "awaiting_them",
+            days_elapsed: 6,
+            threshold_days: 5,
+            last_direction: "outbound",
+            message_count: 1,
+            has_open_deal: null,
+          },
+        },
+      ],
+      new Date("2026-09-21T09:00:00.000Z"),
+    );
+    const ob = (await listPendingObligations(db.client.sql, ctx)).find(
+      (o) => o.thread_id === t.thread_id,
+    )!;
+
+    const d = await recordDraft(db.client.sql, ctx, {
+      obligation_id: ob.id,
+      thread_id: t.thread_id,
+      gmail_draft_id: "gd-e",
+      subject: "Edited",
+      body_ciphertext: new Uint8Array([1]),
+      body_chars: 1,
+      composer: "deterministic",
+      mode: "auto",
+    });
+    await matchDraftToSent(db.client.sql, ctx, d.id, {
+      external_id: "sent-edited",
+      sent_at: "2026-09-20T09:00:00.000Z",
+      edit_ratio: 0.4,
+    });
+    const edited = await listSentAfterDrafts(db.client.sql, ctx, { contact_id: t.contact_id });
+    expect(edited.map((m) => m.external_id)).toEqual(["sent-edited"]);
+    expect((await listSentAfterDrafts(db.client.sql, ctx, { contact_id: uuidv7() })).length).toBe(
+      0,
+    );
+    // Sent as written is not an edit.
+    const d2 = await recordDraft(db.client.sql, ctx, {
+      obligation_id: ob.id,
+      thread_id: t.thread_id,
+      gmail_draft_id: "gd-w",
+      subject: "Edited",
+      body_ciphertext: new Uint8Array([1]),
+      body_chars: 1,
+      composer: "deterministic",
+      mode: "auto",
+    });
+    await matchDraftToSent(db.client.sql, ctx, d2.id, {
+      external_id: "sent-edited",
+      sent_at: "2026-09-20T09:00:00.000Z",
+      edit_ratio: 0.95,
+    });
+    expect(
+      (await listSentAfterDrafts(db.client.sql, ctx, { limit: 5 })).filter(
+        (m) => m.external_id === "sent-edited",
+      ).length,
+    ).toBe(1);
   });
 });

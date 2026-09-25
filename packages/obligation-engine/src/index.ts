@@ -18,6 +18,7 @@ export {
 export { detectObligations, daysBetween, rankObligation, type DetectInput } from "./detect.js";
 export {
   applyIntentRules,
+  fieldSkipped,
   intentRuleSchema,
   intentScopeSchema,
   parseIntentRule,
@@ -32,6 +33,9 @@ export {
 } from "./intents.js";
 export {
   inferIntents,
+  inferFromCorrections,
+  REPEATED_CHANGES,
+  type Correction,
   CONTACT_DISMISSALS,
   ACCOUNT_DISMISSALS,
   YOUNG_DISMISSALS,
